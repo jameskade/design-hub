@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f8fc">
+  <meta name="description" content="团队的设计交付空间。同步 Sketch 设计稿、查看标注、导出资源，让设计与开发保持一致。">
+  <title>Design Hub</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/connect.css">
+  <link rel="service-desc" type="application/vnd.oai.openapi+json" href="/openapi.json">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <link id="ai-context-link" rel="alternate" type="application/json" title="Design Hub AI Context">
+</head>
+<body>
+  <div id="boot-status" class="boot-status" role="status"><span class="brand-mark">DH</span><p>正在打开设计空间…</p></div>
+  <a class="skip-link" href="#dashboard-view">跳到工作区</a>
+  <main id="auth-view" class="auth-shell hidden">
+    <section class="auth-panel">
+      <div class="brand-lockup"><span class="brand-mark">DH</span><strong>Design Hub</strong></div>
+      <h1>好设计，<br>从这里开始协作。</h1>
+      <p>从 Sketch 到开发，每一处细节都有据可依。<br>欢迎回到团队的设计空间。</p>
+      <div class="auth-tabs" aria-label="账号操作">
+        <button class="tab active" data-auth-tab="login" aria-pressed="true">登录空间</button>
+        <button class="tab" data-auth-tab="register" aria-pressed="false">申请加入</button>
+      </div>
+      <form id="login-form" class="auth-form">
+        <label>账号<input name="username" autocomplete="username" placeholder="输入你的账号" required></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="输入密码" required></label>
+        <button class="primary" type="submit">进入设计空间</button>
+      </form>
+      <form id="register-form" class="auth-form hidden">
+        <label>姓名<input name="display_name" autocomplete="name" required></label>
+        <label>账号<input name="username" autocomplete="username" required></label>
+        <label>密码<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
+        <button class="primary" type="submit">提交注册申请</button>
+      </form>
+      <p id="auth-message" class="form-message" aria-live="polite"></p>
+      <nav class="auth-connect-links" aria-label="接入与帮助"><a href="/connect/sketch" target="_blank" rel="noopener">下载 Sketch 插件</a><a href="/connect/mcp" target="_blank" rel="noopener">MCP 接入</a><a href="/connect/guide" target="_blank" rel="noopener">使用指南</a></nav>
+    </section>
+    <aside class="auth-preview" aria-hidden="true">
+      <div class="auth-preview-caption"><span class="brand-symbol">✳</span><h2>让想法，<br>准确抵达。</h2><p>同一份设计，同一处细节，同一个团队。</p></div>
+      <div class="preview-window">
+        <div class="preview-toolbar"><i></i><i></i><i></i><span>Design Hub / 设计交付</span></div>
+        <div class="preview-body">
+          <nav><b>团队项目</b><span>产品设计</span><span>交互方案</span><span>组件资源</span></nav>
+          <div class="preview-canvas"><div class="phone"><span class="demo-time">9:41</span><div class="phone-card"><span>Good design.<br>Made together.</span></div><div class="phone-line"></div><div class="phone-line short"></div><div class="demo-button"></div></div><span class="demo-selection">精确到每一处细节</span></div>
+          <div class="preview-inspector"><b>设计标注</b><span>字体与颜色</span><span>间距与尺寸</span><span>1x / 2x / 3x</span></div>
+        </div>
+      </div>
+      <div class="auth-flow"><span>Sketch 同步</span><i>→</i><span>团队协作</span><i>→</i><span>开发 / AI</span></div>
+    </aside>
+  </main>
+
+  <main id="pending-view" class="pending-view hidden">
+    <div class="pending-card"><span class="status-orb"></span><h1>注册申请已提交</h1><p>管理员分配身份后，你才能查看项目。</p><button id="pending-logout" class="secondary">退出登录</button><nav class="auth-connect-links" aria-label="接入与帮助"><a href="/connect/sketch" target="_blank" rel="noopener">Sketch 插件</a><a href="/connect/mcp" target="_blank" rel="noopener">MCP 接入</a></nav></div>
+  </main>
+
+  <main id="app-view" class="app-shell hidden">
+    <header class="topbar">
+      <button id="home-button" class="icon-button hidden" title="返回项目" aria-label="返回项目" data-icon="arrow-left"></button>
+      <div class="brand-lockup compact"><span class="brand-mark">DH</span><strong id="topbar-title">Design Hub</strong></div>
+      <div id="crumb" class="crumb">项目</div>
+      <div class="top-actions">
+        <a class="ghost" href="/connect/sketch" target="_blank" rel="noopener" title="下载与安装 Sketch 插件" aria-label="Sketch 插件" data-icon="download" data-label="Sketch 插件"></a>
+        <a class="ghost" href="/connect/mcp" target="_blank" rel="noopener" title="MCP 配置与 API Key" aria-label="MCP 接入" data-icon="plug" data-label="MCP 接入"></a>
+        <button id="recycle-button" class="ghost hidden" data-icon="trash" data-label="回收站"></button>
+        <button id="members-button" class="ghost hidden" data-icon="users" data-label="项目成员"></button>
+        <button id="users-button" class="ghost hidden" data-icon="settings" data-label="人员管理"></button>
+        <span id="user-badge" class="user-badge"></span>
+        <button id="logout-button" class="icon-button" title="退出登录" data-icon="logout" data-label="退出"></button>
+      </div>
+    </header>
+    <section class="content-area">
+      <section id="dashboard-view" class="dashboard" tabindex="-1">
+        <div class="dashboard-inner">
+          <section class="studio-hero" aria-labelledby="studio-title">
+            <div class="studio-copy"><p class="studio-kicker"><span></span>团队设计空间</p><h1 id="studio-title">好设计，<br>值得一起实现。</h1><p class="studio-description">设计稿、细节与资源，在这里交接。<br>让每一次协作，从同一份设计开始。</p><div class="studio-actions"><button id="spotlight-open" class="primary" disabled data-icon="arrow-right" data-label="打开最近更新"></button><button class="hero-help" data-open-guide>了解协作方式</button></div></div>
+            <div id="studio-showcase" class="studio-showcase" aria-hidden="true"><div class="showcase-placeholder"><span class="brand-symbol">✳</span><p>为好设计，留一个位置。</p></div></div>
+            <div id="spotlight-caption" class="spotlight-caption">你的设计，只对有权限的团队成员可见</div>
+          </section>
+          <div class="dashboard-heading"><div><h2>团队项目 <span id="project-count" class="count-badge">0</span></h2><p id="dashboard-description">选择项目，查看最新设计与交付资源。</p></div><div class="dashboard-tools"><label class="search-field"><span data-icon="search"></span><input id="project-search" type="search" placeholder="搜索项目" aria-label="搜索项目"><kbd>/</kbd></label><button id="new-project-button" class="primary hidden" data-icon="plus" data-label="新建项目"></button></div></div>
+        <div id="project-list" class="dashboard-grid"></div>
+          <footer class="workspace-footer"><span>从设计到开发，每一处细节都在。</span><button data-open-guide>第一次使用？查看入门指南 <span aria-hidden="true">↗</span></button></footer>
+        </div>
+      </section>
+
+      <section id="stage-view" class="stage-view hidden">
+        <div id="stage-viewport" class="stage-viewport"><div id="stage-world" class="stage-world"></div></div>
+        <aside id="stage-sidebar" class="group-panel">
+          <div class="group-panel-heading"><strong id="stage-group-title">全部</strong><span id="stage-count">0</span><button id="stage-sidebar-close" class="sidebar-collapse" title="收起目录" aria-label="收起目录" data-icon="chevron-left"></button></div>
+          <label class="search-field panel-search"><span data-icon="search"></span><input id="stage-search" type="search" placeholder="搜索设计稿或目录" aria-label="搜索项目中的设计稿或目录"></label>
+          <button id="new-folder-button" class="group-action hidden" data-icon="plus" data-label="新建分组"></button>
+          <div id="folder-list" class="group-list"></div>
+        </aside>
+        <button id="stage-sidebar-open" class="sidebar-open hidden" title="展开目录" data-icon="sidebar" data-label="目录"></button>
+        <div id="stage-empty" class="canvas-empty hidden"><span data-icon="folder"></span><h2>设计，从第一张画板开始</h2><p>在 Sketch 中选中画板，使用 Design Hub 插件同步到这个项目。</p><button class="primary" data-open-guide>查看同步步骤</button></div>
+        <button id="stage-open-selected" class="primary selected-open hidden" data-icon="arrow-right" data-label="打开选中设计稿"></button>
+        <div class="stage-controls"><button id="stage-fit" title="全览" aria-label="全览" data-icon="fit"></button><button id="stage-minus" title="缩小" aria-label="缩小" data-icon="minus"></button><output id="stage-zoom-output">100%</output><button id="stage-plus" title="放大" aria-label="放大" data-icon="plus"></button></div>
+        <div class="stage-hint"><kbd>空格</kbd> 拖动画布 <span>·</span> 双击或 <kbd>Enter</kbd> 打开 <span>·</span> <kbd>⌘ / Ctrl</kbd> 滚轮缩放</div>
+      </section>
+
+      <section id="viewer-view" class="viewer hidden">
+        <div class="viewer-toolbar">
+          <button id="back-to-stage" class="ghost" title="返回项目画布" data-icon="arrow-left" data-label="画布"></button>
+          <div><strong id="viewer-title"></strong><span id="viewer-version-label"></span></div>
+          <label class="zoom-control">缩放 <input id="zoom-range" type="range" min="20" max="250" value="100"><output id="zoom-output">100%</output></label>
+          <button id="viewer-fit" class="icon-button" title="适应窗口（0）" aria-label="适应窗口" data-icon="fit"></button>
+          <button id="copy-screen-prompt" class="ghost" title="复制界面提示词" data-icon="copy" data-label="界面提示词"></button>
+          <button id="copy-ai-link" class="ghost" title="复制不含密钥的 AI 链接" data-icon="link" data-label="AI 链接"></button>
+          <select id="version-select" aria-label="选择历史版本"></select>
+          <button id="delete-artboard" class="danger ghost hidden" data-icon="trash" data-label="删除"></button>
+          <button id="help-button" class="icon-button" title="接入与使用指南（新标签页）" aria-label="接入与使用指南" data-icon="help"></button>
+        </div>
+        <div class="workbench">
+          <aside id="viewer-sidebar" class="design-nav"><div class="design-nav-heading"><strong>项目目录</strong><span id="viewer-board-count"></span><button id="viewer-sidebar-close" class="sidebar-collapse" title="收起目录" aria-label="收起目录" data-icon="chevron-left"></button></div><label class="search-field panel-search"><span data-icon="search"></span><input id="viewer-search" type="search" placeholder="查找设计稿" aria-label="查找设计稿"></label><div id="viewer-folder-list" class="group-list viewer-folder-list"></div></aside>
+          <button id="viewer-sidebar-open" class="viewer-sidebar-open hidden" title="展开目录" aria-label="展开目录" data-icon="chevron-right"></button>
+          <div id="canvas-scroll" class="canvas-scroll" tabindex="0" aria-label="设计稿画布，空格拖动，0 适应窗口"><div id="canvas-stage" class="canvas-stage"><img id="artboard-preview" alt="设计稿预览"><div id="layer-overlay" class="layer-overlay"></div><div id="measurement-overlay" class="measurement-overlay"></div></div><div id="viewer-empty" class="viewer-tip">点击图层查看标注 <span>·</span> 按住空格拖动 <span>·</span> 按 0 适应窗口</div></div>
+          <aside class="inspector-panel">
+            <div class="inspector-heading"><span>设计标注</span><button id="inspector-close" class="icon-button" title="收起标注（Esc）" aria-label="收起标注" data-icon="close"></button></div>
+            <div id="properties-panel" class="inspector-content"></div>
+          </aside>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="simple-dialog" aria-labelledby="dialog-title">
+    <form method="dialog" id="dialog-form">
+      <header><h2 id="dialog-title"></h2><button value="cancel" formnovalidate class="icon-button" aria-label="关闭" data-icon="close"></button></header>
+      <div id="dialog-content" class="dialog-content"></div>
+      <footer><button value="cancel" formnovalidate class="secondary">取消</button><button id="dialog-confirm" value="default" class="primary">保存</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="management-dialog" class="wide-dialog" aria-labelledby="management-title">
+    <form method="dialog">
+      <header><h2 id="management-title"></h2><button value="cancel" class="icon-button" aria-label="关闭" data-icon="close"></button></header>
+      <div id="management-content" class="management-content"></div>
+      <footer><button value="cancel" class="secondary">关闭</button></footer>
+    </form>
+  </dialog>
+
+
+  <main id="connect-view" class="connect-view hidden" tabindex="-1">
+    <header class="connect-topbar">
+      <a class="brand-lockup compact" href="/"><span class="brand-mark">DH</span><strong>Design Hub</strong></a>
+      <span class="connect-breadcrumb">接入中心</span>
+      <a id="connect-home" class="secondary connect-link-button" href="/">登录工作台</a>
+    </header>
+    <div class="connect-shell">
+      <div class="connect-heading"><div><h1>从这里，开始协作。</h1><p>让 Sketch、团队和 AI，连接到同一份设计。</p></div><span class="connect-local-tag">你的部署，你的设计</span></div>
+      <nav class="connect-tabs" aria-label="接入方式">
+        <a href="/connect/sketch" data-connect-tab="sketch"><span data-icon="download"></span>Sketch 插件</a>
+        <a href="/connect/mcp" data-connect-tab="mcp"><span data-icon="plug"></span>MCP 接入</a>
+        <a href="/connect/guide" data-connect-tab="guide"><span data-icon="help"></span>使用指南</a>
+      </nav>
+      <div class="connect-service-address"><div><span>当前服务地址</span><code data-service-origin></code></div><button class="ghost" data-copy-origin data-icon="copy" data-label="复制地址"></button></div>
+      <p id="connect-loopback-note" class="connect-note hidden">这是本机地址，仅适用于与服务在同一台电脑上的插件或 MCP。给其他同事使用时，请通过服务器的局域网 IP 或域名访问本站，再复制地址。</p>
+
+      <section id="connect-sketch" class="connect-panel" aria-labelledby="sketch-heading">
+        <div class="connect-layout">
+          <div class="connect-main">
+            <div class="connect-intro"><span class="connect-eyebrow">给设计师</span><h2 id="sketch-heading" tabindex="-1">让好设计，顺利抵达。</h2><p>选中画板，一次同步。让团队直接查看最新设计、精确标注和配套资源。</p></div>
+            <ol class="connect-steps">
+              <li><span class="step-number">1</span><div><h3>下载并安装插件</h3><p>解压下载的 ZIP，双击 <code>DesignHub.sketchplugin</code>，按 Sketch 提示安装。插件位于「插件 → Design Hub」。</p><p class="step-detail">需要 macOS 与 Sketch。已有旧版时按 Sketch 的提示更新，然后重新打开 Sketch。</p></div></li>
+              <li><span class="step-number">2</span><div><h3>连接团队的 Design Hub</h3><p>在「插件 → Design Hub → 配置服务地址」粘贴上方地址。首次上传时，使用本站账号登录。</p><p class="step-detail">还没有账号？先在登录页申请注册，由管理员分配身份，再由项目负责人添加项目权限。</p></div></li>
+              <li><span class="step-number">3</span><div><h3>选中画板，上传到项目</h3><p>在 Sketch 里选中要交付的画板，运行「上传选中画板」，选择项目与目录，等待实际上传结果。</p><div class="connect-callout"><strong>同步范围由你的选择决定</strong><p>同一个画板有变化时生成新版本；未变化的跳过。没有选中的画板不会被删除或覆盖。</p></div></div></li>
+            </ol>
+          </div>
+          <aside class="connect-side">
+            <div class="integration-card">
+              <div class="integration-art" aria-hidden="true"><div class="integration-file"><span data-icon="image"></span><b>Sketch</b><small>设计的起点</small></div><span class="integration-arrow">→</span><div class="integration-destination"><span class="brand-mark">DH</span><small>团队的共同版本</small></div></div>
+              <div class="integration-card-body"><div class="integration-title"><h3>Design Hub for Sketch</h3><span class="connect-badge" id="sketch-version">读取版本中</span></div><p>与当前服务配套的插件安装包。</p><a class="primary connect-link-button" data-integration-download href="/downloads/DesignHub.sketchplugin.zip" download aria-disabled="true" tabindex="-1" data-icon="download" data-label="下载 Sketch 插件"></a><div class="integration-spec"><span>安装位置</span><strong>你的 Mac · Sketch</strong><span>兼容要求</span><strong id="sketch-compatible">macOS + Sketch</strong><span>安装包格式</span><strong>.sketchplugin.zip</strong></div></div>
+            </div>
+            <p class="connect-aside-note">安装包由当前服务直接提供。无需克隆源码，也无需前往 GitHub 下载。</p>
+          </aside>
+        </div>
+      </section>
+
+      <section id="connect-mcp" class="connect-panel hidden" aria-labelledby="mcp-heading">
+        <div class="connect-layout">
+          <div class="connect-main">
+            <div class="connect-intro"><span class="connect-eyebrow">给开发者与 AI</span><h2 id="mcp-heading" tabindex="-1">让 AI 读到设计的细节。</h2><p>通过 MCP 获取图层、文字、样式与真实资源，给实现提供结构化依据。</p></div>
+            <ol class="connect-steps">
+              <li><span class="step-number">1</span><div><h3>下载到运行 AI 客户端的电脑</h3><p>保存 <code>design_hub_mcp.py</code>，确认本机有 Python 3。脚本只使用 Python 标准库，无需安装额外 Python 包。</p><a class="secondary connect-link-button" data-integration-download href="/downloads/design_hub_mcp.py" download aria-disabled="true" tabindex="-1" data-icon="download" data-label="下载 MCP 脚本"></a></div></li>
+              <li><span class="step-number">2</span><div><h3>按你的路径生成客户端配置</h3><p>这是本地 stdio 接入。客户端启动脚本，脚本再连接 Design Hub；网站地址不是远程 MCP 端点。</p>
+                <div class="mcp-config-form">
+                  <label>客户端配置格式<select id="mcp-client"><option value="codex">Codex · TOML</option><option value="json">兼容客户端 · mcpServers JSON</option></select></label>
+                  <label>Python 命令或解释器路径<input id="mcp-python" value="python3" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help"></label>
+                  <label class="wide">脚本在这台电脑上的绝对路径<input id="mcp-script-path" placeholder="/Users/你的用户名/Downloads/design_hub_mcp.py" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help mcp-config-error"></label>
+                </div>
+                <p id="mcp-path-help" class="step-detail">填写你刚保存的文件路径。请勿使用服务器上的路径或「~」缩写；如果客户端找不到 Python，请填写解释器的绝对路径。</p>
+                <p id="mcp-config-error" class="connect-validation" aria-live="polite">填写脚本路径后即可复制配置。</p>
+                <div class="config-preview"><header><span id="mcp-config-filename">~/.codex/config.toml</span><button id="copy-mcp-config" class="ghost" disabled data-icon="copy" data-label="复制配置"></button></header><pre id="mcp-config-output" tabindex="0">填写上方路径，生成此电脑可用的配置。</pre></div>
+                <p id="mcp-client-help" class="step-detail">合并到已有配置中，保留其他服务条目。保存后，在客户端重新加载 MCP 或重新打开客户端。</p>
+                <a id="mcp-official-docs" class="connect-text-link" href="https://developers.openai.com/codex/mcp" target="_blank" rel="noopener">查看 Codex 官方配置说明 ↗</a>
+              </div></li>
+              <li><span class="step-number">3</span><div><h3>提供个人 Key，验证实际调用</h3><p>在「你的个人访问凭据」中创建只读 Key。每次工具调用需要 <code>base_url</code> 和 <code>api_key</code>；Key 通过你自己的 AI 客户端提供，不写入此配置或分享链接。</p><div class="mcp-tool-list"><span><b>列出可见项目</b><code>design_hub_list_projects</code></span><span><b>读取设计上下文</b><code>design_hub_get_artboard_context</code></span><span><b>读取图片资源</b><code>design_hub_get_asset</code></span></div><button id="copy-mcp-check" class="secondary" data-icon="copy" data-label="复制验证指引"></button><p class="step-detail">以 AI 客户端的真实调用结果为准。网页能提供下载与配置说明，无法判断另一台电脑上的 MCP 进程是否已经连接。</p></div></li>
+            </ol>
+          </div>
+          <aside class="connect-side">
+            <div class="integration-card mcp-card"><div class="mcp-card-art" aria-hidden="true"><span class="brand-mark">DH</span><span class="mcp-wire"></span><span class="mcp-glyph" data-icon="plug"></span><strong>设计上下文<br>直接交给 AI</strong></div><div class="integration-card-body"><h3>你的个人访问凭据</h3><p id="connect-key-status" aria-live="polite">正在检查登录状态…</p><button id="api-keys-button" class="primary" disabled data-icon="key" data-label="管理只读 API Key"></button><a id="connect-login" class="secondary connect-link-button hidden" href="/?next=%2Fconnect%2Fmcp">登录后管理 Key</a><div class="integration-spec"><span>访问范围</span><strong>你有权限的项目</strong><span>操作权限</span><strong>只读</strong><span>运行方式</span><strong>本地 stdio</strong></div></div></div>
+            <div class="connect-side-help"><h3>项目列表是空的？</h3><p>请项目负责人添加你的成员权限。Key 会实时继承权限，无需重新创建。</p><a href="/connect/guide" data-connect-link>了解账号与权限 ↗</a></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="connect-guide" class="connect-panel hidden" aria-labelledby="guide-heading">
+        <div class="connect-intro"><span class="connect-eyebrow">给每一位团队成员</span><h2 id="guide-heading" tabindex="-1">从同一份设计，开始工作。</h2><p>找到对应角色，完成第一次交接。部署只需要管理员做一次。</p></div>
+        <div class="connect-role-grid">
+          <article><span class="role-icon" data-icon="image"></span><h3>设计师</h3><p>创建项目与目录，安装 Sketch 插件，同步选中的画板。更新同一画板会保留版本历史。</p><a href="/connect/sketch" data-connect-link>安装插件与首次上传 ↗</a></article>
+          <article><span class="role-icon" data-icon="fit"></span><h3>开发者</h3><p>搜索设计稿，点击图层查看尺寸与样式。选中后悬停其他图层看间距，双击属性值复制，按需要导出资源。</p><a href="/" target="_blank" rel="noopener">打开设计工作台 ↗</a></article>
+          <article><span class="role-icon" data-icon="plug"></span><h3>AI 使用者</h3><p>安装本地 MCP 脚本，用自己的只读 Key 获取设计结构和图片资源，再通过实际工具调用验证接入。</p><a href="/connect/mcp" data-connect-link>配置 MCP ↗</a></article>
+        </div>
+        <div class="connect-guide-grid"><section class="connect-white-card"><h3>账号与项目权限</h3><ol class="permission-steps"><li>申请注册后，先等待管理员分配身份。</li><li>项目负责人再把你加入具体项目。</li><li>设计师可以按项目权限上传；开发者查看与导出。</li><li>API Key 使用同一套权限，撤销或移除权限后会失效。</li></ol></section><section class="connect-white-card"><h3>常用快捷键</h3><div class="connect-shortcuts"><span><kbd>空格</kbd> + 拖动<b>平移画布</b></span><span><kbd>⌘ / Ctrl</kbd> + 滚轮<b>缩放</b></span><span><kbd>0</kbd><b>适应窗口</b></span><span><kbd>/</kbd><b>搜索</b></span><span><kbd>Enter</kbd><b>打开选中稿件</b></span><span><kbd>Esc</kbd><b>关闭标注或弹窗</b></span></div></section></div>
+        <section class="connect-faq"><h3>遇到问题时</h3><details><summary>插件里没有项目，或无法上传</summary><p>先用相同账号登录工作台，确认身份已审核且具有项目编辑权限。再核对插件配置的服务地址；其他电脑不能使用服务器的 127.0.0.1 地址。</p></details><details><summary>MCP 启动失败，或找不到 Python / 脚本</summary><p>确认 Python 安装在运行 AI 客户端的电脑上，配置中的脚本与解释器路径确实存在。脚本通过标准输入输出通信，直接在终端运行后等待输入是正常现象。</p></details><details><summary>MCP 返回 401、403 或空列表</summary><p>401 通常需要检查 Key 是否正确或已撤销；403 需要检查账号身份或项目权限；空列表表示当前账号没有可见项目。请通过本站 Key 管理和项目负责人处理。</p></details><details><summary>缺少无阴影资源，或预览没有更新</summary><p>先确认查看的是需要的设计版本。缺少无阴影资源时，请设计师用当前插件重新同步画板；页面不会用裁剪来冒充去掉阴影。</p></details></section>
+      </section>
+      <div id="connect-download-error" class="connect-download-error hidden" role="status"><span>下载信息暂时不可用，请检查服务后重试。</span><button id="retry-integrations" class="secondary">重新读取</button></div>
+      <footer class="connect-footer"><span>Design Hub · 团队的设计交付空间</span><a href="/docs" target="_blank" rel="noopener">只读 API 文档 ↗</a></footer>
+    </div>
+  </main>
+
+  <div id="busy-status" class="busy-status hidden" role="status"><span></span><span id="busy-message">正在加载…</span></div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/connect.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

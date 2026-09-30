@@ -1,0 +1,17 @@
+.env
+data/
+logs/
+design-hub.pid
+__pycache__/
+.pytest_cache/
+node_modules/
+*.pyc
+*.log
+*.pid
+.DS_Store
+*.backup-*
+.global/
+.codegraph/
+# 本地内部文档和验收素材，不进入公开仓库。
+/doc/
+/docs/

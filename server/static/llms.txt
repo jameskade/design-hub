@@ -1,0 +1,31 @@
+# Design Hub
+
+Design Hub is a local design delivery service. Prefer its structured API over screenshots.
+
+## Discovery
+
+- OpenAPI: /openapi.json
+- Human documentation: /docs
+- Service manifest: /.well-known/design-hub.json
+- Artboard AI entry: /ai/artboards/{artboard_id}
+
+## Authentication
+
+Protected endpoints require a read-only user API Key:
+
+Authorization: Bearer dhk_xxx
+
+The Key inherits the user's current project permissions. Never put the Key in a URL, prompt, log or source file. Read it from a secret store or environment variable.
+
+## Recommended workflow
+
+1. GET /api/me
+2. GET /api/projects
+3. GET /api/projects/{project_id}/folders
+4. GET /api/projects/{project_id}/artboards
+5. GET /api/artboards/{artboard_id}/ai-context
+6. Download required preview or asset URLs using the same Authorization header
+
+Use ai-context as the primary source for coordinate space, system regions, content frame, layer hierarchy, text, style, constraints and responsive rules. Do not treat the Design Hub web application's sidebar, toolbar or browser coordinates as design coordinates.
+
+API Keys are read-only. Do not attempt uploads, deletes, membership changes or other writes.

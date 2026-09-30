@@ -1,0 +1,33 @@
+{
+  "name": "Design Hub",
+  "description": "将选中的 Sketch 画板和资源上传到公司本地 Design Hub。",
+  "author": "GPower",
+  "identifier": "com.gpower.designhub",
+  "version": "0.1.1",
+  "compatibleVersion": "99",
+  "commands": [
+    {
+      "name": "上传选中画板",
+      "identifier": "designHubUpload",
+      "script": "script.js",
+      "handler": "uploadSelectedArtboards",
+      "shortcut": "ctrl command u"
+    },
+    {
+      "name": "配置服务地址",
+      "identifier": "designHubConfigure",
+      "script": "script.js",
+      "handler": "configureServer"
+    },
+    {
+      "name": "退出登录",
+      "identifier": "designHubLogout",
+      "script": "script.js",
+      "handler": "logout"
+    }
+  ],
+  "menu": {
+    "title": "Design Hub",
+    "items": ["designHubUpload", "designHubConfigure", "designHubLogout"]
+  }
+}

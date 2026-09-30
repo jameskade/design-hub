@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE_PATH" ]]; do
+  SOURCE_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  [[ "$SOURCE_PATH" = /* ]] || SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+REPO_ROOT="${DESIGN_HUB_ROOT:-$(cd "$(dirname "$SOURCE_PATH")" && pwd)}"
+START_SCRIPT="$REPO_ROOT/start_server.sh"
+PID_FILE="$REPO_ROOT/design-hub.pid"
+LOG_FILE="$REPO_ROOT/logs/design-hub.log"
+ENV_FILE="$REPO_ROOT/.env"
+PLUGIN_SOURCE="$REPO_ROOT/sketch-plugin/DesignHub.sketchplugin"
+PLUGIN_TARGET="$HOME/Library/Application Support/com.bohemiancoding.sketch3/Plugins/DesignHub.sketchplugin"
+LAUNCH_LABEL="com.ghost.design-hub"
+LAUNCH_DOMAIN="gui/$(id -u)"
+
+if [[ -t 1 && "${NO_COLOR:-0}" != "1" ]]; then
+  GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; RED=$'\033[0;31m'; RESET=$'\033[0m'
+else
+  GREEN=""; YELLOW=""; RED=""; RESET=""
+fi
+green() { printf '%s%s%s' "$GREEN" "$1" "$RESET"; }
+yellow() { printf '%s%s%s' "$YELLOW" "$1" "$RESET"; }
+red() { printf '%s%s%s' "$RED" "$1" "$RESET"; }
+
+env_value() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 0
+  local raw
+  raw="$(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")"
+  raw="${raw%\"}"; raw="${raw#\"}"
+  printf '%s' "$raw"
+}
+
+resolve_port() { local value; value="${DESIGN_HUB_PORT:-$(env_value DESIGN_HUB_PORT)}"; printf '%s' "${value:-8765}"; }
+resolve_host() { local value; value="${DESIGN_HUB_HOST:-$(env_value DESIGN_HUB_HOST)}"; printf '%s' "${value:-0.0.0.0}"; }
+admin_username() { local value; value="$(env_value DESIGN_HUB_ADMIN_USERNAME)"; printf '%s' "${value:-admin}"; }
+admin_password() { env_value DESIGN_HUB_ADMIN_PASSWORD; }
+local_url() { printf 'http://127.0.0.1:%s' "$(resolve_port)"; }
+lan_address() { ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || printf '127.0.0.1'; }
+lan_url() { printf 'http://%s:%s' "$(lan_address)" "$(resolve_port)"; }
+
+running_pid() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local service_pid
+  service_pid="$(<"$PID_FILE")"
+  [[ "$service_pid" =~ ^[0-9]+$ ]] && kill -0 "$service_pid" 2>/dev/null || return 1
+  printf '%s' "$service_pid"
+}
+
+health_code() {
+  local code
+  code="$(curl -sS -o /dev/null --max-time 2 -w '%{http_code}' "$(local_url)/api/health" 2>/dev/null || true)"
+  printf '%s' "${code:-000}"
+}
+
+database_check() {
+  local database="$REPO_ROOT/data/design-hub.sqlite3"
+  [[ -f "$database" ]] || { printf '未初始化'; return; }
+  python3 - "$database" <<'PY' 2>/dev/null || printf '检查失败'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+print(connection.execute("PRAGMA quick_check").fetchone()[0])
+PY
+}
+
+prepare() {
+  command -v python3 >/dev/null 2>&1 || { echo '缺少 python3' >&2; return 1; }
+  python3 - "$ENV_FILE" "$REPO_ROOT/.env.example" <<'PY'
+from pathlib import Path
+import secrets, sys
+target, example = map(Path, sys.argv[1:])
+if not target.exists():
+    target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+lines = target.read_text(encoding="utf-8").splitlines()
+values = {}
+for line in lines:
+    if "=" in line and not line.lstrip().startswith("#"):
+        key, value = line.split("=", 1)
+        values[key] = value
+generated = False
+if not values.get("DESIGN_HUB_ADMIN_PASSWORD"):
+    values["DESIGN_HUB_ADMIN_PASSWORD"] = secrets.token_urlsafe(18)
+    generated = True
+ordered = ["DESIGN_HUB_HOST", "DESIGN_HUB_PORT", "DESIGN_HUB_ADMIN_USERNAME", "DESIGN_HUB_ADMIN_PASSWORD", "DESIGN_HUB_MAX_UPLOAD_MB"]
+target.write_text("\n".join(f"{key}={values.get(key, '')}" for key in ordered) + "\n", encoding="utf-8")
+print("generated" if generated else "ready")
+PY
+  chmod 600 "$ENV_FILE"
+}
+
+status_plain() {
+  local service_pid="" running="false" health plugin password_value database
+  service_pid="$(running_pid || true)"
+  [[ -n "$service_pid" ]] && running="true"
+  health="$(health_code)"
+  [[ -d "$PLUGIN_TARGET" ]] && plugin="installed" || plugin="missing"
+  password_value="$(admin_password)"
+  database="$(database_check)"
+  cat <<EOF
+installed=$([[ -x "$START_SCRIPT" ]] && echo true || echo false)
+running=$running
+pid=$service_pid
+host=$(resolve_host)
+port=$(resolve_port)
+local_url=$(local_url)
+lan_url=$(lan_url)
+health=$health
+admin_username=$(admin_username)
+admin_password=$password_value
+database=$database
+plugin=$plugin
+data_dir=$REPO_ROOT/data
+EOF
+}
+
+status_panel() {
+  local service_pid="" health state password_value plugin_state database
+  service_pid="$(running_pid || true)"; health="$(health_code)"; database="$(database_check)"
+  if [[ -n "$service_pid" && "$health" == "200" ]]; then state="$(green 已运行)"; elif [[ -n "$service_pid" ]]; then state="$(yellow 启动中/异常)"; else state="$(red 未运行)"; fi
+  password_value="$(admin_password)"
+  [[ -n "$password_value" ]] || password_value="$(red 未配置)"
+  [[ -d "$PLUGIN_TARGET" ]] && plugin_state="$(green 已安装)" || plugin_state="$(red 未安装)"
+  echo 'Design Hub 控制台'
+  echo "  运行状态: $state"
+  echo "  PID: ${service_pid:-none}"
+  echo "  本机地址: $(local_url)"
+  echo "  局域网地址: $(lan_url)"
+  echo "  健康检查: HTTP $health"
+  echo ''
+  echo "  Admin账号: $(admin_username)"
+  echo "  Admin密码: $password_value"
+  echo "  Sketch插件: $plugin_state"
+  echo "  SQLite: $database"
+  echo "  数据目录: $REPO_ROOT/data"
+}
+
+start_service() { local result; result="$(prepare)"; [[ "$result" == "generated" ]] && echo '已自动生成初始 Admin 密码，可运行 gh_design_hub credentials 查看。'; "$START_SCRIPT" --no-tail --quiet; echo "Design Hub 已启动: $(lan_url)"; }
+stop_service() {
+  local service_pid; service_pid="$(running_pid || true)"
+  [[ -n "$service_pid" ]] || { launchctl bootout "$LAUNCH_DOMAIN/$LAUNCH_LABEL" 2>/dev/null || true; echo 'Design Hub 当前未运行'; return; }
+  launchctl bootout "$LAUNCH_DOMAIN/$LAUNCH_LABEL" 2>/dev/null || kill "$service_pid" 2>/dev/null || true
+  for _ in {1..12}; do kill -0 "$service_pid" 2>/dev/null || break; sleep 1; done
+  kill -0 "$service_pid" 2>/dev/null && kill -9 "$service_pid" 2>/dev/null || true
+  rm -f "$PID_FILE"; echo 'Design Hub 已停止'
+}
+restart_service() { stop_service; start_service; }
+show_logs() { mkdir -p "$(dirname "$LOG_FILE")"; touch "$LOG_FILE"; tail -n 100 -F "$LOG_FILE"; }
+show_password() { prepare >/dev/null; admin_password; printf '\n'; }
+show_credentials() {
+  prepare >/dev/null
+  echo "管理地址: $(lan_url)"
+  echo "本机地址: $(local_url)"
+  echo "Admin账号: $(admin_username)"
+  printf '初始Admin密码: '; admin_password; printf '\n'
+  echo '说明: 如果已在网页重置密码，以网页中的新密码为准。'
+}
+show_endpoints() { echo "本机网页/API: $(local_url)"; echo "局域网网页/API: $(lan_url)"; echo '公网地址: 未配置域名/HTTPS'; }
+open_management() { open "$(local_url)"; echo "已打开: $(local_url)"; }
+install_plugin() { "$REPO_ROOT/install_sketch_plugin.sh"; }
+
+usage() {
+  cat <<'EOF'
+Usage: gh_design_hub [command]
+
+Commands:
+  menu                 显示交互菜单
+  status [--plain]     显示状态面板
+  start                后台启动，不自动刷日志
+  stop                 停止服务
+  restart              重启服务，不自动刷日志
+  logs                 跟随最近 100 行日志
+  open                 在浏览器打开管理页面
+  url                  输出本机管理地址
+  api | endpoints      输出本机、局域网和公网状态
+  credentials | login  输出管理地址和初始 Admin 登录信息
+  password             输出初始 Admin 密码
+  prepare | setup      初始化 .env 并生成初始 Admin 密码
+  plugin               安装或更新 Sketch 插件
+  help                 显示帮助
+EOF
+}
+pause_prompt() { if [[ -t 0 ]]; then printf '按回车键继续...'; read -r _; fi; }
+menu() {
+  local choice=""
+  while true; do
+    [[ -t 1 ]] && command -v clear >/dev/null 2>&1 && clear
+    status_panel; echo ''
+    echo '  1) 启动 Design Hub'; echo '  2) 重启 Design Hub'; echo '  3) 停止 Design Hub'; echo '  4) 查看日志'
+    echo '  5) 打开管理页面'; echo '  6) 查看登录信息'; echo '  7) 安装/更新 Sketch 插件'; echo '  0) 退出'
+    printf '选择操作: '; read -r choice
+    case "$choice" in
+      1) start_service; pause_prompt ;; 2) restart_service; pause_prompt ;; 3) stop_service; pause_prompt ;;
+      4) show_logs ;; 5) open_management; pause_prompt ;; 6) show_credentials; pause_prompt ;; 7) install_plugin; pause_prompt ;;
+      0) break ;; *) echo '无效选择'; pause_prompt ;;
+    esac
+  done
+}
+
+command_name="${1:-menu}"
+case "$command_name" in
+  menu) menu ;;
+  status) [[ "${2:-}" == "--plain" ]] && status_plain || status_panel ;;
+  start) start_service ;; stop) stop_service ;; restart) restart_service ;; logs) show_logs ;;
+  open) open_management ;; url) local_url; printf '\n' ;; api|endpoints) show_endpoints ;;
+  credentials|login) show_credentials ;; password) show_password ;; prepare|setup) prepare >/dev/null; echo 'Design Hub 默认配置已准备。' ;;
+  plugin) install_plugin ;; help|-h|--help) usage ;;
+  *) echo "未知命令: $command_name" >&2; usage >&2; exit 2 ;;
+esac

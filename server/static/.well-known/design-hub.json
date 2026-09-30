@@ -1,0 +1,14 @@
+{
+  "service": "Design Hub",
+  "version": "1.0",
+  "openapi": "/openapi.json",
+  "documentation": "/docs",
+  "llms_txt": "/llms.txt",
+  "artboard_ai_entry_template": "/ai/artboards/{artboard_id}",
+  "artboard_context_template": "/api/artboards/{artboard_id}/ai-context",
+  "authentication": {
+    "type": "http_bearer",
+    "format": "Bearer dhk_xxx",
+    "scope": "read"
+  }
+}

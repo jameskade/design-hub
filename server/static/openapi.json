@@ -1,0 +1,69 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Design Hub Read API",
+    "version": "1.0.0",
+    "description": "Read-only project, artboard, layout and asset API for local AI agents."
+  },
+  "servers": [{ "url": "/", "description": "Current Design Hub origin" }],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "DesignHubApiKey" }
+    },
+    "parameters": {
+      "projectId": { "name": "project_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "artboardId": { "name": "artboard_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "versionId": { "name": "version_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "assetId": { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "responses": {
+      "Unauthorized": { "description": "API Key missing, invalid or revoked" },
+      "Forbidden": { "description": "The API Key user cannot access this project, or attempted a write operation" },
+      "NotFound": { "description": "Resource not found" }
+    }
+  },
+  "paths": {
+    "/api/me": {
+      "get": { "summary": "Resolve the API Key user", "responses": { "200": { "description": "Authenticated user and auth kind" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/api/projects": {
+      "get": { "summary": "List projects visible to the API Key user", "responses": { "200": { "description": "Project list with access_role" }, "401": { "$ref": "#/components/responses/Unauthorized" } } }
+    },
+    "/api/projects/{project_id}": {
+      "get": { "summary": "Get one visible project", "parameters": [{ "$ref": "#/components/parameters/projectId" }], "responses": { "200": { "description": "Project details" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/projects/{project_id}/folders": {
+      "get": { "summary": "List project folders", "parameters": [{ "$ref": "#/components/parameters/projectId" }], "responses": { "200": { "description": "Folder list" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/projects/{project_id}/artboards": {
+      "get": { "summary": "List project artboards", "parameters": [{ "$ref": "#/components/parameters/projectId" }], "responses": { "200": { "description": "Artboards and current version ids" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/artboards/{artboard_id}": {
+      "get": { "summary": "Get artboard details and version history", "parameters": [{ "$ref": "#/components/parameters/artboardId" }], "responses": { "200": { "description": "Artboard and versions" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/api/artboards/{artboard_id}/ai-context": {
+      "get": {
+        "summary": "Get screenshot-free normalized layout context for an AI agent",
+        "description": "Returns project, folder, artboard, version, coordinate space, system regions, responsive rules, flattened layers, text, style, constraints and authenticated asset URLs. Use the current version by default.",
+        "parameters": [
+          { "$ref": "#/components/parameters/artboardId" },
+          { "name": "version_id", "in": "query", "required": false, "description": "Historical version id", "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "AI layout context" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
+    "/api/versions/{version_id}": {
+      "get": { "summary": "Get raw Sketch metadata and asset list", "parameters": [{ "$ref": "#/components/parameters/versionId" }], "responses": { "200": { "description": "Version metadata and assets" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/versions/{version_id}/preview": {
+      "get": { "summary": "Download the artboard preview", "parameters": [{ "$ref": "#/components/parameters/versionId" }], "responses": { "200": { "description": "PNG preview" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/api/assets/{asset_id}/download": {
+      "get": { "summary": "Download one authenticated design asset", "parameters": [{ "$ref": "#/components/parameters/assetId" }], "responses": { "200": { "description": "Asset bytes" }, "403": { "$ref": "#/components/responses/Forbidden" } } }
+    },
+    "/ai/artboards/{artboard_id}": {
+      "get": { "security": [], "summary": "Public self-describing AI entry point", "parameters": [{ "$ref": "#/components/parameters/artboardId" }], "responses": { "200": { "description": "Discovery URLs and authentication instructions; no design data" } } }
+    }
+  }
+}
