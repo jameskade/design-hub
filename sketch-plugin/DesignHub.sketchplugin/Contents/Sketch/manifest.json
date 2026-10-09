@@ -3,7 +3,7 @@
   "description": "将选中的 Sketch 画板和资源上传到公司本地 Design Hub。",
   "author": "GPower",
   "identifier": "com.gpower.designhub",
-  "version": "0.1.1",
+  "version": "1.0.1",
   "compatibleVersion": "99",
   "commands": [
     {

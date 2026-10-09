@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent.parent
+APP_VERSION = json.loads((ROOT / "sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/manifest.json").read_text(encoding="utf-8"))["version"]
 STATIC_DIR = ROOT / "server" / "static"
 # 只发布安装必需的已知文件；新增插件资源时同步此白名单，禁止打包服务工作目录。
 PLUGIN_DOWNLOAD_FILES = ("Contents/Sketch/manifest.json", "Contents/Sketch/script.js")
@@ -33,6 +34,7 @@ DATA_DIR = Path(os.environ.get("DESIGN_HUB_DATA_DIR", ROOT / "data")).resolve()
 DB_PATH = DATA_DIR / "design-hub.sqlite3"
 PROJECT_DATA_DIR = DATA_DIR / "projects"
 EXPORT_CACHE_DIR = DATA_DIR / ".exports"
+UPLOAD_DIR = DATA_DIR / ".uploads"
 HOST = os.environ.get("DESIGN_HUB_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DESIGN_HUB_PORT", "8765"))
 MAX_BODY_BYTES = int(os.environ.get("DESIGN_HUB_MAX_UPLOAD_MB", "150")) * 1024 * 1024
@@ -428,7 +430,7 @@ def ai_layout(metadata, assets, width, height):
 
 
 class DesignHubHandler(BaseHTTPRequestHandler):
-    server_version = "DesignHub/0.1"
+    server_version = f"DesignHub/{APP_VERSION}"
 
     def log_message(self, fmt, *args):
         sys.stdout.write(
@@ -454,7 +456,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             path = parsed.path.rstrip("/") or "/"
             query = parse_qs(parsed.query)
             if path == "/api/health" and method == "GET":
-                return self._json(200, {"status": "ok", "service": "design-hub"})
+                return self._json(200, {"status": "ok", "service": "design-hub", "version": APP_VERSION})
             if path == "/api/integrations" and method == "GET":
                 manifest = json.loads(self._integration_source("sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/manifest.json"))
                 self._integration_source("sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/script.js")
@@ -734,6 +736,10 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 return self._list_artboards(user, project_id, query)
             if len(parts) == 5 and parts[3:] == ["artboards", "upload"] and method == "POST":
                 return self._upload_artboards(user, project_id)
+            if len(parts) == 4 and parts[3] == "uploads" and method == "POST":
+                return self._staged_upload(user, project_id)
+            if len(parts) == 6 and parts[3] == "uploads" and method == "POST":
+                return self._staged_upload(user, project_id, parts[4], parts[5])
 
         if len(parts) == 3 and parts[:2] == ["api", "artboards"]:
             if method == "GET":
@@ -1096,7 +1102,77 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             db.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
         return self._json(200, {"results": results})
 
-    def _store_artboard(self, db, user, project_id, folder_id, board):
+    def _staged_upload(self, user, project_id, upload_id=None, action=None):
+        data = self._read_json()
+        with WRITE_LOCK, db_connection() as db:
+            require_project_role(db, user, project_id, {"editor", "owner", "admin"})
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            # 只清理本协议生成、超过一天的暂存目录，不触及正式版本。
+            for stale in UPLOAD_DIR.iterdir():
+                if re.fullmatch(r"[0-9a-f-]{36}", stale.name) and stale.is_dir() and time.time() - stale.stat().st_mtime > 86400:
+                    shutil.rmtree(stale)
+            if upload_id is None:
+                board = data.get("board")
+                folder_id = str(data.get("folder_id", ""))
+                if not isinstance(board, dict) or not board.get("sketch_id") or not board.get("name") or not isinstance(board.get("metadata"), dict) or not decode_file(board.get("preview_base64"), "预览"):
+                    raise ApiError(400, "缺少画板信息或预览")
+                if not db.execute("SELECT id FROM folders WHERE id=? AND project_id=? AND deleted_at IS NULL", (folder_id, project_id)).fetchone():
+                    raise ApiError(400, "目标目录不存在")
+                upload_id = uuid4()
+                target = UPLOAD_DIR / upload_id
+                target.mkdir()
+                board.pop("assets", None)
+                (target / "session.json").write_text(canonical_json({"user_id": user["id"], "project_id": project_id, "folder_id": folder_id, "board": board}), encoding="utf-8")
+                return self._json(201, {"upload_id": upload_id})
+            if not re.fullmatch(r"[0-9a-f-]{36}", upload_id):
+                raise ApiError(400, "上传任务 ID 无效")
+            target = UPLOAD_DIR / upload_id
+            if not (target / "session.json").is_file():
+                raise ApiError(404, "上传任务不存在或已过期")
+            session = json.loads((target / "session.json").read_text(encoding="utf-8"))
+            if session["user_id"] != user["id"] or session["project_id"] != project_id:
+                raise ApiError(403, "无权操作此上传任务")
+            if action == "cancel":
+                shutil.rmtree(target)
+                return self._json(200, {"cancelled": True})
+            chunks = sorted(target.glob("chunk-*.json"))
+            if action == "chunk":
+                assets = data.get("assets")
+                if type(data.get("index")) is not int or data["index"] != len(chunks) or not isinstance(assets, list) or not 1 <= len(assets) <= 32:
+                    raise ApiError(400, "资源批次序号或数量无效")
+                if len(chunks) >= 20000 or sum(p.stat().st_size for p in target.iterdir()) + len(canonical_json(data).encode("utf-8")) > 2 * 1024**3:
+                    raise ApiError(413, "单画板暂存超过安全容量")
+                for asset in assets:
+                    if not isinstance(asset, dict) or not decode_file(asset.get("data_base64"), "资源"):
+                        raise ApiError(400, "资源为空或无效")
+                temporary = target / "chunk.tmp"
+                temporary.write_text(canonical_json(assets), encoding="utf-8")
+                os.replace(temporary, target / f"chunk-{len(chunks):06d}.json")
+                return self._json(200, {"index": data["index"], "received": len(assets)})
+            if action != "commit":
+                raise ApiError(404, "上传操作不存在")
+            if type(data.get("chunks")) is not int or data["chunks"] != len(chunks) or type(data.get("assets")) is not int:
+                raise ApiError(400, "上传批次不完整")
+            count = sum(len(json.loads(p.read_text(encoding="utf-8"))) for p in chunks)
+            if count != data["assets"]:
+                raise ApiError(400, "上传资源不完整")
+            if not db.execute("SELECT id FROM folders WHERE id=? AND project_id=? AND deleted_at IS NULL", (session["folder_id"], project_id)).fetchone():
+                raise ApiError(400, "目标目录不存在")
+            def asset_source():
+                # 每次只解码一批；内容哈希与落盘各遍历一次，避免整画板常驻内存。
+                for path in chunks:
+                    for asset in json.loads(path.read_text(encoding="utf-8")):
+                        yield asset, decode_file(asset["data_base64"], "资源")
+            result = self._store_artboard(db, user, project_id, session["folder_id"], session["board"], asset_source)
+            now = utc_now()
+            db.execute("UPDATE folders SET updated_at=? WHERE id=?", (now, session["folder_id"]))
+            db.execute("UPDATE projects SET updated_at=? WHERE id=?", (now, project_id))
+            # 事务成功才清理暂存，缺批或发布失败不会改变当前版本。
+            db.commit()
+            shutil.rmtree(target)
+        return self._json(200, {"results": [result]})
+
+    def _store_artboard(self, db, user, project_id, folder_id, board, asset_source=None):
         sketch_id = str(board.get("sketch_id", "")).strip()
         name = str(board.get("name", "")).strip()
         metadata = board.get("metadata")
@@ -1111,13 +1187,13 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         asset_payloads = []
         digest = hashlib.sha256(canonical_json(metadata).encode("utf-8"))
         digest.update(preview)
-        for asset in assets:
-            raw = decode_file(asset.get("data_base64"), f"资源 {asset.get('name', '')}")
+        for asset, raw in (asset_source() if asset_source else ((a, decode_file(a.get("data_base64"), "资源")) for a in assets)):
             if not raw:
                 continue
             digest.update(raw)
             digest.update(canonical_json({key: asset.get(key) for key in ("layer_id", "name", "kind", "format", "scale", "width", "height")}).encode("utf-8"))
-            asset_payloads.append((asset, raw))
+            if asset_source is None:
+                asset_payloads.append((asset, raw))
         content_hash = digest.hexdigest()
         existing = db.execute(
             "SELECT * FROM artboards WHERE project_id = ? AND sketch_id = ?",
@@ -1151,7 +1227,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             metadata_path.write_text(canonical_json(metadata), encoding="utf-8")
             preview_path.write_bytes(preview)
             stored_assets = []
-            for index, (asset, raw) in enumerate(asset_payloads):
+            for index, (asset, raw) in enumerate(asset_source() if asset_source else asset_payloads):
                 asset_id = uuid4()
                 file_format = safe_format(asset.get("format"))
                 filename = f"{index:04d}-{asset_id}.{file_format}"

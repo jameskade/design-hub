@@ -107,6 +107,38 @@ def main():
             board = admin.json(f"/api/projects/{project}/artboards/upload", upload)["results"][0]["artboard_id"]
             version = admin.json(f"/api/artboards/{board}")["artboard"]["current_version_id"]
             asset = admin.json(f"/api/versions/{version}")["assets"][0]["id"]
+            staged_base = f"/api/projects/{project}/uploads"
+            stage_body = {"folder_id": folder, "board": upload["artboards"][0]}
+            sid = admin.json(staged_base, stage_body, expected=201)["upload_id"]
+            stage = f"{staged_base}/{sid}"
+            pending.call(stage + "/chunk", {"index": 0, "assets": upload["artboards"][0]["assets"]}, expected=403)
+            # 即使另一账号有项目写权限，也不能接管他人的暂存任务。
+            with app.db_connection() as db:
+                db.execute("UPDATE users SET role='admin' WHERE username='pending-test'")
+            pending.call(stage + "/cancel", {}, expected=403)
+            with app.db_connection() as db:
+                db.execute("UPDATE users SET role='pending' WHERE username='pending-test'")
+            batch = upload["artboards"][0]["assets"] * 26
+            for index in range(20):
+                admin.json(stage + "/chunk", {"index": index, "assets": batch})
+            admin.call(stage + "/chunk", {"index": 19, "assets": batch}, expected=400)
+            admin.call(stage + "/commit", {"chunks": 21, "assets": 520}, expected=400)
+            admin.call(stage + "/commit", {"chunks": 20, "assets": 519}, expected=400)
+            assert admin.json(f"/api/artboards/{board}")["artboard"]["current_version_id"] == version
+            published = admin.json(stage + "/commit", {"chunks": 20, "assets": 520})["results"][0]
+            assert published["status"] == "updated"
+            new_version = admin.json(f"/api/artboards/{board}")["artboard"]["current_version_id"]
+            assert len(admin.json(f"/api/versions/{new_version}")["assets"]) == 520
+            assert not (app.UPLOAD_DIR / sid).exists()
+            sid = admin.json(staged_base, stage_body, expected=201)["upload_id"]
+            stage = f"{staged_base}/{sid}"
+            for index in range(20):
+                admin.json(stage + "/chunk", {"index": index, "assets": batch})
+            assert admin.json(stage + "/commit", {"chunks": 20, "assets": 520})["results"][0]["status"] == "unchanged"
+            sid = admin.json(staged_base, stage_body, expected=201)["upload_id"]
+            admin.json(f"{staged_base}/{sid}/cancel", {})
+            assert not (app.UPLOAD_DIR / sid).exists()
+            print("PASS: 520 资源分批发布、缺批/计数错误保留旧版本、拒绝重复批次、权限、取消清理、重复上传 unchanged")
             downloaded = root / "downloaded_mcp.py"
             downloaded.write_bytes(script)
             requests = [

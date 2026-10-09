@@ -1,11 +1,17 @@
 const sketch = require("sketch");
 const UI = require("sketch/ui");
 const Settings = require("sketch/settings");
+const timers = require("timers");
 
 const SERVER_KEY = "designHub.serverURL";
 const TOKEN_KEY = "designHub.sessionToken";
 const USER_KEY = "designHub.username";
-const UPLOAD_CONCURRENCY = 3;
+const UPLOAD_CONCURRENCY = 1;
+
+function schedule(callback) {
+  // 使用 Sketch 公开的 timers 模块，由其 fiber 保持脚本存活并让出事件循环。
+  return timers.setTimeout(callback, 20);
+}
 
 function normalizeServerURL(value) {
   let url = String(value || "").trim();
@@ -49,18 +55,6 @@ function request(method, path, body, token) {
   const nativeError = errorPointer.value();
   if (nativeError) throw new Error(`连接失败：${nativeError.localizedDescription()}`);
   return parseResponse(data, responsePointer.value());
-}
-
-function requestAsync(method, path, body, token, callback) {
-  const completion = __mocha__.createBlock_function('v32@?0@"NSData"8@"NSURLResponse"16@"NSError"24', (data, response, nativeError) => {
-    const main = __mocha__.createBlock_function("v8@?0", () => {
-      if (nativeError) { callback(new Error(`连接失败：${nativeError.localizedDescription()}`)); return; }
-      try { callback(null, parseResponse(data, response)); } catch (error) { callback(error); }
-    });
-    dispatch_async(dispatch_get_main_queue(), main);
-  });
-  const task = NSURLSession.sharedSession().dataTaskWithRequest_completionHandler(nativeJSONRequest(method, path, body, token), completion);
-  task.resume();
 }
 
 function configureServer() {
@@ -205,6 +199,7 @@ function gradientMetadata(gradient) {
 function textFontMetadata(layer) {
   try {
     const attributed = layer.sketchObject.attributedStringValue();
+    if (!attributed.length()) return {};
     const attributes = attributed.attributesAtIndex_effectiveRange(0, null);
     const font = attributes.objectForKey(NSFontAttributeName);
     return font ? { displayName: String(font.displayName()), postscriptName: String(font.fontName()) } : {};
@@ -321,7 +316,8 @@ function filesIn(directory) {
 
 function base64File(path) {
   const data = NSData.dataWithContentsOfFile(path);
-  return data ? String(data.base64EncodedStringWithOptions(0)) : "";
+  if (!data || !data.length()) throw new Error("导出资源为空或无法读取");
+  return String(data.base64EncodedStringWithOptions(0));
 }
 
 function exportLayerFiles(layer, directory, kind = "slice", includeSvg = true) {
@@ -330,7 +326,7 @@ function exportLayerFiles(layer, directory, kind = "slice", includeSvg = true) {
   try {
     sketch.export(layer, { output: directory, formats: "png", scales: "1,2,3", "use-id-for-name": true, overwriting: true });
   } catch (error) {
-    console.log(`[DesignHub]:[Export] PNG 失败 layer=${layer.id} error=${error}`);
+    throw new Error(`图层“${layer.name}”PNG 导出失败`);
   }
   if (includeSvg) {
     try {
@@ -365,23 +361,22 @@ function exportShadowlessLayerFiles(layer, directory) {
   if (!shadows.length) return [];
   const target = directory + "/no-shadow-" + layerIdentifier(layer);
   NSFileManager.defaultManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error(target, true, null, null);
-  shadows.forEach((shadow) => { shadow.enabled = false; });
   try {
+    shadows.forEach((shadow) => { shadow.enabled = false; });
     return exportLayerFiles(layer, target, "slice-no-shadow", false);
   } finally {
     shadows.forEach((shadow) => { shadow.enabled = true; });
   }
 }
 
-function collectAssets(layer, directory, output = []) {
+function collectAssetLayers(layer, output = []) {
   const style = layer.style || {};
   const hasPattern = (style.fills || []).some((fill) => String(fill.fillType || "") === "Pattern");
   const autoExport = ["Bitmap", "Image", "SymbolInstance", "Shape", "ShapePath", "Text", "Group"].includes(String(layer.type || ""));
-  if (output.length < 480 && ((layer.exportFormats || []).length || hasPattern || autoExport)) {
-    output.push(...exportLayerFiles(layer, directory));
-    if (output.length < 480) output.push(...exportShadowlessLayerFiles(layer, directory));
+  if ((layer.exportFormats || []).length || hasPattern || autoExport) {
+    output.push(layer);
   }
-  (layer.layers || []).forEach((child) => collectAssets(child, directory, output));
+  (layer.layers || []).forEach((child) => collectAssetLayers(child, output));
   return output;
 }
 
@@ -406,7 +401,6 @@ function buildPayload(artboard, folderId) {
       canvas_y: number(artboard.frame.y),
       metadata: { artboard: layerMetadata(artboard) },
       preview_base64: exportPreview(artboard, artboardDirectory),
-      assets: collectAssets(artboard, artboardDirectory),
     }] };
   } finally {
     NSFileManager.defaultManager().removeItemAtPath_error(directory, null);
@@ -415,6 +409,8 @@ function buildPayload(artboard, folderId) {
 
 function uploadProgress(total) {
   const window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer(NSMakeRect(0, 0, 440, 132), NSTitledWindowMask, NSBackingStoreBuffered, false);
+  // Mocha 管理原生对象的生命周期；close 不得再额外释放窗口。
+  window.setReleasedWhenClosed(false);
   window.setTitle("正在上传到 Design Hub");
   const current = NSTextField.alloc().initWithFrame(NSMakeRect(20, 82, 400, 24));
   current.setEditable(false); current.setBezeled(false); current.setDrawsBackground(false); current.setFont(NSFont.boldSystemFontOfSize(13));
@@ -424,12 +420,12 @@ function uploadProgress(total) {
   summary.setEditable(false); summary.setBezeled(false); summary.setDrawsBackground(false); summary.setTextColor(NSColor.secondaryLabelColor());
   window.contentView().addSubview(current); window.contentView().addSubview(indicator); window.contentView().addSubview(summary); window.center(); window.makeKeyAndOrderFront(null);
   const refresh = () => {
-    // Sketch 的导出和 HTTP 请求都是同步调用，主动刷新 RunLoop 才能让进度窗持续重绘。
-    window.displayIfNeeded(); NSRunLoop.currentRunLoop().runUntilDate(NSDate.dateWithTimeIntervalSinceNow(0.01));
+    // 每个画板由官方定时器分帧执行；这里只刷新控件，不手动嵌套 RunLoop。
+    window.displayIfNeeded();
   };
   return {
     update(completed, phase, artboard, counts, active) {
-      const progress = Math.min(99, Math.round(((completed + (phase === "正在上传" ? 0.5 : 0)) / total) * 100));
+      const progress = Math.round((completed / total) * 100);
       current.setStringValue(`${phase} · ${artboard.name}`);
       indicator.setDoubleValue(progress);
       summary.setStringValue(`完成 ${completed}/${total} · 上传中 ${active}/${Math.min(UPLOAD_CONCURRENCY, total)} · 新增 ${counts.created || 0} · 更新 ${counts.updated || 0} · 未变化 ${counts.unchanged || 0} · 失败 ${counts.failed || 0}`);
@@ -443,33 +439,73 @@ function uploadProgress(total) {
 }
 
 function uploadToFolder(token, project, folder, artboards) {
+  // 在同步选项回调内固定基础值，后续 fiber 不再读取弹窗回调持有的目标对象。
+  const projectId = String(project && project.id || "");
+  const folderId = String(folder && folder.id || "");
+  const sessionToken = String(token || "");
+  const base = `/api/projects/${projectId}/uploads`;
+  if (!/^[0-9a-f-]{36}$/i.test(projectId) || !/^[0-9a-f-]{36}$/i.test(folderId) || !sessionToken) {
+    UI.alert("无法开始上传", "项目、目录或登录状态无效，请重新选择后上传。");
+    return;
+  }
   if (!confirmUpload(artboards, project.name, folder.name)) return;
-  const counts = { created: 0, updated: 0, unchanged: 0, failed: 0 }; const failures = []; const progress = uploadProgress(artboards.length); const concurrency = Math.min(UPLOAD_CONCURRENCY, artboards.length); let nextIndex = 0; let active = 0; let completed = 0; let finished = false; let scheduling = false;
-  if (typeof coscript !== "undefined") coscript.shouldKeepAround = true;
+  const counts = { created: 0, updated: 0, unchanged: 0, failed: 0 }; const failures = []; const progress = uploadProgress(artboards.length);
   const fail = (artboard, error) => { counts.failed += 1; failures.push(`${artboard.name}：${error.message}`); console.log(`[DesignHub]:[Upload] 失败 artboard=${artboard.name} error=${error.message}`); };
-  const finish = () => {
-    if (finished || completed < artboards.length || active) return false; finished = true; progress.finish(counts); progress.close(); UI.message("上传进度 100% · 完成");
-    const failureText = failures.length ? `\n\n失败画板：\n${failures.slice(0, 8).join("\n")}${failures.length > 8 ? `\n另有 ${failures.length - 8} 个失败` : ""}` : "";
-    UI.alert(failures.length ? "上传完成（部分失败）" : "上传完成", `并发 ${concurrency} · 新增 ${counts.created} · 更新 ${counts.updated} · 未变化 ${counts.unchanged} · 失败 ${counts.failed}${failureText}`);
-    if (typeof coscript !== "undefined") coscript.shouldKeepAround = false; return true;
+  let index = 0;
+  const uploadNext = () => {
+    const artboard = artboards[index];
+    progress.update(index, "正在导出", artboard, counts, 0);
+    let uploadId = null; let layerIndex = 0; let chunks = 0; let assets = 0; let layers = [];
+    const advance = () => {
+      index += 1; progress.update(index, "已完成", artboard, counts, 0);
+      if (index < artboards.length) { schedule(uploadNext); return; }
+      progress.finish(counts); progress.close(); UI.message("上传进度 100% · 完成");
+      const failureText = failures.length ? `\n\n失败画板：\n${failures.slice(0, 8).join("\n")}${failures.length > 8 ? `\n另有 ${failures.length - 8} 个失败` : ""}` : "";
+      UI.alert(failures.length ? "上传完成（部分失败）" : "上传完成", `分批上传 · 新增 ${counts.created} · 更新 ${counts.updated} · 未变化 ${counts.unchanged} · 失败 ${counts.failed}${failureText}`);
+    };
+    const abort = (error) => {
+      fail(artboard, error);
+      if (uploadId) { try { request("POST", `${base}/${uploadId}/cancel`, {}, sessionToken); } catch (_) { /* 断网暂存由服务端过期清理。 */ } }
+      advance();
+    };
+    const uploadLayer = () => {
+      try {
+        if (layerIndex < layers.length) {
+          const directory = createTempDirectory();
+          try {
+            const layer = layers[layerIndex];
+            const batch = exportLayerFiles(layer, directory).concat(exportShadowlessLayerFiles(layer, directory));
+            if (!batch.length) throw new Error(`图层“${layer.name}”未导出任何资源`);
+            // 单个资源一批，避免父分组的多倍率 PNG 同时进入一个请求。
+            for (const asset of batch) {
+              const ack = request("POST", `${base}/${uploadId}/chunk`, { index: chunks, assets: [asset] }, sessionToken);
+              if (ack.index !== chunks || ack.received !== 1) throw new Error("服务端未确认资源批次");
+              chunks += 1; assets += 1;
+            }
+          } finally { NSFileManager.defaultManager().removeItemAtPath_error(directory, null); }
+          layerIndex += 1;
+          progress.update(index, `资源 ${assets} 个已上传 · 图层 ${layerIndex}/${layers.length}`, artboard, counts, 1);
+          schedule(uploadLayer); return;
+        }
+        const result = request("POST", `${base}/${uploadId}/commit`, { chunks, assets }, sessionToken);
+        const item = result.results && result.results[0];
+        if (!item || result.results.length !== 1 || item.sketch_id !== layerIdentifier(artboard) || !["created", "updated", "unchanged"].includes(item.status)) {
+          throw new Error("服务端未确认当前画板上传结果，请检查网页后重试");
+        }
+        counts[item.status] += 1;
+        advance();
+      } catch (error) { abort(error); }
+    };
+    try {
+      const payload = buildPayload(artboard, folderId);
+      layers = collectAssetLayers(artboard);
+      const started = request("POST", base, { folder_id: folderId, board: payload.artboards[0] }, sessionToken);
+      uploadId = started.upload_id;
+      if (!/^[0-9a-f-]{36}$/.test(uploadId || "")) throw new Error("服务端没有返回有效上传任务，请升级服务端");
+      schedule(uploadLayer);
+    } catch (error) { abort(error); }
   };
-  const schedule = () => {
-    if (scheduling) return; scheduling = true;
-    while (active < concurrency && nextIndex < artboards.length) {
-      const artboard = artboards[nextIndex]; nextIndex += 1; progress.update(completed, "正在导出", artboard, counts, active);
-      let payload;
-      try { payload = buildPayload(artboard, folder.id); }
-      catch (error) { fail(artboard, error); completed += 1; continue; }
-      active += 1; progress.update(completed, "正在上传", artboard, counts, active);
-      requestAsync("POST", `/api/projects/${project.id}/artboards/upload`, payload, token, (error, result) => {
-        active -= 1; completed += 1;
-        if (error) fail(artboard, error); else (result.results || []).forEach((item) => { counts[item.status] = (counts[item.status] || 0) + 1; });
-        progress.update(completed, "已完成", artboard, counts, active); if (!finish()) schedule();
-      });
-    }
-    scheduling = false; finish();
-  };
-  schedule();
+  schedule(uploadNext);
 }
 
 function chooseOrCreateFolder(token, project, folders, artboards) {

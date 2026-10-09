@@ -10,10 +10,7 @@ MANIFEST="$SOURCE/Contents/Sketch/manifest.json"
 [[ -d "$SOURCE" ]] || { printf '[ERR] plugin bundle missing: %s\n' "$SOURCE" >&2; exit 1; }
 [[ -f "$MANIFEST" ]] || { printf '[ERR] plugin manifest missing: %s\n' "$MANIFEST" >&2; exit 1; }
 VERSION="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$MANIFEST")"
-if git -C "$SCRIPT_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- sketch-plugin/DesignHub.sketchplugin; then
-  PREVIOUS_VERSION="$(git -C "$SCRIPT_DIR" show HEAD:sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/manifest.json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))' 2>/dev/null || true)"
-  [[ "$VERSION" != "$PREVIOUS_VERSION" ]] || { printf '[ERR] plugin changed but version is still %s; bump manifest.json first.\n' "$VERSION" >&2; exit 1; }
-fi
+# 正式版本跟随整体发布；同一版本的开发和验收允许重复安装，仍保留旧插件备份。
 mkdir -p "$PLUGIN_DIR"
 if [[ -e "$TARGET" ]]; then
   BACKUP="$PLUGIN_DIR/DesignHub.sketchplugin.backup-$(date +%Y%m%d_%H%M%S)"
