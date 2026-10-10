@@ -7,6 +7,12 @@
   "compatibleVersion": "99",
   "commands": [
     {
+      "name": "登录 / 切换服务器",
+      "identifier": "designHubLogin",
+      "script": "script.js",
+      "handler": "loginToServer"
+    },
+    {
       "name": "上传选中画板",
       "identifier": "designHubUpload",
       "script": "script.js",
@@ -28,6 +34,6 @@
   ],
   "menu": {
     "title": "Design Hub",
-    "items": ["designHubUpload", "designHubConfigure", "designHubLogout"]
+    "items": ["designHubUpload", "designHubLogin", "designHubConfigure", "designHubLogout"]
   }
 }

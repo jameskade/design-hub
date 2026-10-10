@@ -6,6 +6,8 @@ const timers = require("timers");
 const SERVER_KEY = "designHub.serverURL";
 const TOKEN_KEY = "designHub.sessionToken";
 const USER_KEY = "designHub.username";
+// 下载打包时由对应部署注入地址；直接安装源码时必须手动填写。
+const BUNDLED_SERVER_URL = "";
 const UPLOAD_CONCURRENCY = 1;
 
 function schedule(callback) {
@@ -16,13 +18,18 @@ function schedule(callback) {
 function normalizeServerURL(value) {
   let url = String(value || "").trim();
   while (url.endsWith("/")) url = url.slice(0, -1);
-  if (!(url.startsWith("http://") || url.startsWith("https://"))) throw new Error("服务地址必须以 http:// 或 https:// 开头");
+  const match = url.match(/^https?:\/\/(?:\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::([0-9]{1,5}))?$/);
+  if (!match || (match[1] && (Number(match[1]) < 1 || Number(match[1]) > 65535))) throw new Error("请填写服务器地址，例如 http://192.168.1.100:8765，不包含账号或其他路径");
   return url;
 }
 
-function nativeJSONRequest(method, path, body, token) {
-  const serverURL = normalizeServerURL(Settings.settingForKey(SERVER_KEY) || "http://127.0.0.1:8765");
-  const requestURL = NSURL.URLWithString(serverURL + path);
+function serverURL() {
+  return String(Settings.settingForKey(SERVER_KEY) || BUNDLED_SERVER_URL || "");
+}
+
+function nativeJSONRequest(method, path, body, token, selectedOrigin) {
+  const origin = normalizeServerURL(selectedOrigin || serverURL());
+  const requestURL = NSURL.URLWithString(origin + path);
   const nativeRequest = NSMutableURLRequest.requestWithURL(requestURL);
   nativeRequest.setHTTPMethod(method);
   nativeRequest.setTimeoutInterval(120);
@@ -47,8 +54,8 @@ function parseResponse(data, response) {
   return result;
 }
 
-function request(method, path, body, token) {
-  const nativeRequest = nativeJSONRequest(method, path, body, token);
+function request(method, path, body, token, selectedOrigin) {
+  const nativeRequest = nativeJSONRequest(method, path, body, token, selectedOrigin);
   const responsePointer = MOPointer.alloc().init();
   const errorPointer = MOPointer.alloc().init();
   const data = NSURLConnection.sendSynchronousRequest_returningResponse_error(nativeRequest, responsePointer, errorPointer);
@@ -58,7 +65,7 @@ function request(method, path, body, token) {
 }
 
 function configureServer() {
-  const current = Settings.settingForKey(SERVER_KEY) || "http://127.0.0.1:8765";
+  const current = serverURL();
   UI.getInputFromUser("Design Hub 服务地址", { initialValue: current }, (error, value) => {
     if (error) return;
     try {
@@ -71,6 +78,18 @@ function configureServer() {
   });
 }
 
+function chooseUploadServer(callback) {
+  UI.getInputFromUser("本次上传的服务器地址", {initialValue:serverURL(),description:"每次上传都可修改。切换服务器后需要重新登录。",okButton:"继续",cancelButton:"取消"}, (error, value) => {
+    if (error) return;
+    try {
+      const selected = normalizeServerURL(value);
+      if (selected !== serverURL()) Settings.setSettingForKey(TOKEN_KEY, undefined);
+      Settings.setSettingForKey(SERVER_KEY, selected);
+    } catch (validationError) { UI.alert("服务地址无效", validationError.message); return; }
+    callback();
+  });
+}
+
 function login(callback) {
   console.log("[DesignHub]:[Auth] 显示登录窗口");
   const alert = NSAlert.alloc().init();
@@ -79,18 +98,26 @@ function login(callback) {
   alert.addButtonWithTitle("登录");
   alert.addButtonWithTitle("取消");
 
-  const view = NSView.alloc().initWithFrame(NSMakeRect(0, 0, 360, 108));
+  const view = NSView.alloc().initWithFrame(NSMakeRect(0, 0, 360, 150));
+  const server = NSTextField.alloc().initWithFrame(NSMakeRect(0, 106, 360, 28));
+  server.setPlaceholderString("服务地址，例如 http://服务器IP:8765");
+  server.setStringValue(serverURL());
   const username = NSTextField.alloc().initWithFrame(NSMakeRect(0, 62, 360, 28));
   username.setPlaceholderString("账号");
   username.setStringValue(Settings.settingForKey(USER_KEY) || "");
   const password = NSSecureTextField.alloc().initWithFrame(NSMakeRect(0, 22, 360, 28));
   password.setPlaceholderString("密码");
+  view.addSubview(server);
   view.addSubview(username);
   view.addSubview(password);
   alert.setAccessoryView(view);
 
   if (alert.runModal() !== NSAlertFirstButtonReturn) return;
   try {
+    const origin = normalizeServerURL(String(server.stringValue()));
+    // 重新登录/切换服务时清除旧令牌，不能把另一部署的会话带入新地址。
+    Settings.setSettingForKey(SERVER_KEY, origin);
+    Settings.setSettingForKey(TOKEN_KEY, undefined);
     const result = request("POST", "/api/plugin/login", {
       username: String(username.stringValue()),
       password: String(password.stringValue()),
@@ -103,6 +130,10 @@ function login(callback) {
   }
 }
 
+function loginToServer() {
+  login(() => UI.message("Design Hub 登录成功"));
+}
+
 function logout() {
   Settings.setSettingForKey(TOKEN_KEY, undefined);
   Settings.setSettingForKey(USER_KEY, undefined);
@@ -111,7 +142,7 @@ function logout() {
 
 function withToken(callback) {
   const token = Settings.settingForKey(TOKEN_KEY);
-  if (token) {
+  if (token && serverURL()) {
     try {
       const me = request("GET", "/api/me", null, token);
       callback(token, me.user);
@@ -161,7 +192,7 @@ function choose(title, items, callback) {
 function confirmUpload(artboards, projectName, folderName) {
   const alert = NSAlert.alloc().init();
   alert.setMessageText(`上传 ${artboards.length} 个画板`);
-  alert.setInformativeText(`${projectName} / ${folderName}\n\n${artboards.map((board) => `• ${board.name}`).join("\n")}`);
+  alert.setInformativeText(`${serverURL()}\n${projectName} / ${folderName}\n\n${artboards.map((board) => `• ${board.name}`).join("\n")}`);
   alert.addButtonWithTitle("开始上传");
   alert.addButtonWithTitle("取消");
   return alert.runModal() === NSAlertFirstButtonReturn;
@@ -448,6 +479,8 @@ function uploadToFolder(token, project, folder, artboards) {
     UI.alert("无法开始上传", "项目、目录或登录状态无效，请重新选择后上传。");
     return;
   }
+  // 在途批次固定目标地址，即使另一次操作修改设置，也不能把令牌发到另一服务器。
+  const uploadOrigin = normalizeServerURL(serverURL());
   if (!confirmUpload(artboards, project.name, folder.name)) return;
   const counts = { created: 0, updated: 0, unchanged: 0, failed: 0 }; const failures = []; const progress = uploadProgress(artboards.length);
   const fail = (artboard, error) => { counts.failed += 1; failures.push(`${artboard.name}：${error.message}`); console.log(`[DesignHub]:[Upload] 失败 artboard=${artboard.name} error=${error.message}`); };
@@ -465,7 +498,7 @@ function uploadToFolder(token, project, folder, artboards) {
     };
     const abort = (error) => {
       fail(artboard, error);
-      if (uploadId) { try { request("POST", `${base}/${uploadId}/cancel`, {}, sessionToken); } catch (_) { /* 断网暂存由服务端过期清理。 */ } }
+      if (uploadId) { try { request("POST", `${base}/${uploadId}/cancel`, {}, sessionToken, uploadOrigin); } catch (_) { /* 断网暂存由服务端过期清理。 */ } }
       advance();
     };
     const uploadLayer = () => {
@@ -478,7 +511,7 @@ function uploadToFolder(token, project, folder, artboards) {
             if (!batch.length) throw new Error(`图层“${layer.name}”未导出任何资源`);
             // 单个资源一批，避免父分组的多倍率 PNG 同时进入一个请求。
             for (const asset of batch) {
-              const ack = request("POST", `${base}/${uploadId}/chunk`, { index: chunks, assets: [asset] }, sessionToken);
+              const ack = request("POST", `${base}/${uploadId}/chunk`, { index: chunks, assets: [asset] }, sessionToken, uploadOrigin);
               if (ack.index !== chunks || ack.received !== 1) throw new Error("服务端未确认资源批次");
               chunks += 1; assets += 1;
             }
@@ -487,7 +520,7 @@ function uploadToFolder(token, project, folder, artboards) {
           progress.update(index, `资源 ${assets} 个已上传 · 图层 ${layerIndex}/${layers.length}`, artboard, counts, 1);
           schedule(uploadLayer); return;
         }
-        const result = request("POST", `${base}/${uploadId}/commit`, { chunks, assets }, sessionToken);
+        const result = request("POST", `${base}/${uploadId}/commit`, { chunks, assets }, sessionToken, uploadOrigin);
         const item = result.results && result.results[0];
         if (!item || result.results.length !== 1 || item.sketch_id !== layerIdentifier(artboard) || !["created", "updated", "unchanged"].includes(item.status)) {
           throw new Error("服务端未确认当前画板上传结果，请检查网页后重试");
@@ -499,7 +532,7 @@ function uploadToFolder(token, project, folder, artboards) {
     try {
       const payload = buildPayload(artboard, folderId);
       layers = collectAssetLayers(artboard);
-      const started = request("POST", base, { folder_id: folderId, board: payload.artboards[0] }, sessionToken);
+      const started = request("POST", base, { folder_id: folderId, board: payload.artboards[0] }, sessionToken, uploadOrigin);
       uploadId = started.upload_id;
       if (!/^[0-9a-f-]{36}$/.test(uploadId || "")) throw new Error("服务端没有返回有效上传任务，请升级服务端");
       schedule(uploadLayer);
@@ -534,7 +567,7 @@ function uploadSelectedArtboards() {
     UI.alert("没有选择画板", "请先在 Sketch 画布中选择一个或多个 Artboard，再运行上传。");
     return;
   }
-  withToken((token, user) => {
+  chooseUploadServer(() => withToken((token, user) => {
     if (!["designer", "admin"].includes(user.role)) {
       UI.alert("没有上传权限", "当前账号不是设计人员或管理员。");
       return;
@@ -553,5 +586,5 @@ function uploadSelectedArtboards() {
     } catch (error) {
       UI.alert("读取项目失败", error.message);
     }
-  });
+  }));
 }

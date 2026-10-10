@@ -653,10 +653,26 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if path == "/downloads/design_hub_mcp.py":
             return self._download_bytes(self._integration_source("design_hub_mcp.py"), "design_hub_mcp.py")
         if path == "/downloads/DesignHub.sketchplugin.zip":
+            # 仅使用直接访问地址或管理员指定的公网地址，不信任转发头注入脚本。
+            origin = os.environ.get("DESIGN_HUB_PUBLIC_URL") or "http://" + self.headers.get("Host", "")
+            parsed = urlparse(origin)
+            try:
+                valid = parsed.scheme in {"http", "https"} and parsed.hostname and re.fullmatch(r"[A-Za-z0-9.\-:\[\]]+", parsed.netloc) and not parsed.username and not parsed.password and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment and (parsed.port is None or 1 <= parsed.port <= 65535)
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ApiError(400, "下载地址无效，请通过正确的服务地址访问")
+            origin = f"{parsed.scheme}://{parsed.netloc}"
             archive = io.BytesIO()
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
                 for relative in PLUGIN_DOWNLOAD_FILES:
                     source = self._integration_source(f"sketch-plugin/DesignHub.sketchplugin/{relative}")
+                    if relative == "Contents/Sketch/script.js":
+                        marker = 'const BUNDLED_SERVER_URL = "";'
+                        text = source.decode("utf-8")
+                        if text.count(marker) != 1:
+                            raise ApiError(503, "插件地址模板不匹配，请检查部署文件")
+                        source = text.replace(marker, 'const BUNDLED_SERVER_URL = ' + json.dumps(origin) + ';').encode("utf-8")
                     bundle.writestr(f"DesignHub.sketchplugin/{relative}", source)
             return self._download_bytes(archive.getvalue(), "DesignHub.sketchplugin.zip")
         raise ApiError(404, "下载文件不存在")

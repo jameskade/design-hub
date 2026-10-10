@@ -83,7 +83,10 @@ def main():
                 expected = {"DesignHub.sketchplugin/" + relative for relative in app.PLUGIN_DOWNLOAD_FILES}
                 assert set(bundle.namelist()) == expected
                 for name in expected:
-                    assert bundle.read(name) == (source / "sketch-plugin" / name).read_bytes()
+                    expected_source = (source / "sketch-plugin" / name).read_bytes()
+                    if name.endswith('/script.js'):
+                        expected_source = expected_source.replace(b'const BUNDLED_SERVER_URL = "";', ('const BUNDLED_SERVER_URL = '+json.dumps(origin)+';').encode())
+                    assert bundle.read(name) == expected_source
             script, headers = anonymous.call("/downloads/design_hub_mcp.py")
             assert script == (repo / "design_hub_mcp.py").read_bytes()
             assert headers["X-Content-Type-Options"] == "nosniff"
