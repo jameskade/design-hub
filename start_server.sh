@@ -39,6 +39,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
+PYTHON_BIN="$(command -v python3)"
+[[ ! -x "$SCRIPT_DIR/.venv/bin/python3" ]] || PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python3"
+"$PYTHON_BIN" -c 'from cryptography.fernet import Fernet' >/dev/null 2>&1 || fail '请先执行 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
 command -v curl >/dev/null 2>&1 || fail 'curl is required'
 command -v lsof >/dev/null 2>&1 || fail 'lsof is required'
 
@@ -96,7 +99,7 @@ fi
 info "starting Design Hub on $HOST:$PORT"
 mkdir -p "$(dirname "$LAUNCH_PLIST")"
 launchctl bootout "$LAUNCH_DOMAIN/$LAUNCH_LABEL" 2>/dev/null || true
-python3 - "$LAUNCH_PLIST" "$(command -v python3)" "$SCRIPT_DIR/server/app.py" "$SCRIPT_DIR" "$LOG_FILE" "$HOST" "$PORT" "${DESIGN_HUB_ADMIN_USERNAME:-admin}" "${DESIGN_HUB_ADMIN_PASSWORD:-}" "${DESIGN_HUB_MAX_UPLOAD_MB:-150}" <<'PY'
+"$PYTHON_BIN" - "$LAUNCH_PLIST" "$PYTHON_BIN" "$SCRIPT_DIR/server/app.py" "$SCRIPT_DIR" "$LOG_FILE" "$HOST" "$PORT" "${DESIGN_HUB_ADMIN_USERNAME:-admin}" "${DESIGN_HUB_ADMIN_PASSWORD:-}" "${DESIGN_HUB_MAX_UPLOAD_MB:-150}" <<'PY'
 import plistlib, sys
 plist, python, app, cwd, log, host, port, username, password, upload_mb = sys.argv[1:]
 payload = {

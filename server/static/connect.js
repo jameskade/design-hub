@@ -1,3 +1,4 @@
+let mcpNpmDownload = null;
 function connectSectionFromPath() {
   const match = location.pathname.match(/^\/connect(?:\/(sketch|mcp|guide))?\/?$/);
   return match ? match[1] || "sketch" : null;
@@ -20,10 +21,14 @@ async function loadConnectDownloads() {
   try {
     const info = await api("/api/integrations");
     if (!info.sketch?.version || info.mcp?.transport !== "stdio") throw new Error("接入信息无效");
+    mcpNpmDownload = info.mcp.npm_download_url || null;
+    renderMcpConfig();
     document.querySelector("#sketch-version").textContent = `v${info.sketch.version}`;
     document.querySelector("#sketch-compatible").textContent = info.sketch.compatible_version ? `macOS · Sketch ${info.sketch.compatible_version}+` : "macOS + Sketch";
     links.forEach((a) => { a.removeAttribute("aria-disabled"); a.tabIndex = 0; });
   } catch {
+    mcpNpmDownload = null;
+    renderMcpConfig();
     document.querySelector("#sketch-version").textContent = "版本暂不可用";
     document.querySelector("#connect-download-error").classList.remove("hidden");
   }
@@ -39,7 +44,7 @@ async function initializeConnect() {
       const result = await api("/api/me"); state.user = result.user; state.csrf = result.csrf_token;
       document.querySelector("#connect-home").textContent = "返回工作台";
       const active = ["developer", "designer", "admin"].includes(state.user.role);
-      button.disabled = !active; status.textContent = active ? `已登录为 ${state.user.display_name}。Key 仅允许读取你有权限的项目，完整值只在创建时显示一次。` : "账号尚未获准访问项目，请联系管理员分配身份后再创建 Key。";
+      button.disabled = !active; status.textContent = active ? `已登录为 ${state.user.display_name}。新建 Key 可在本人管理页再次查看、复制或删除；旧版 Key 原文不可恢复。` : "账号尚未获准访问项目，请联系管理员分配身份后再创建 Key。";
     } catch (error) {
       state.user = null; state.csrf = "";
       login.classList.remove("hidden"); status.textContent = error.status === 401 ? "登录后创建个人只读 Key。下载和配置说明无需登录。" : "暂时无法核对账号状态。请检查连接，或重新登录工作台。";
@@ -64,13 +69,31 @@ function renderMcpConfig() {
   document.querySelector("#mcp-official-docs").classList.toggle("hidden", client !== "codex");
   document.querySelector("#mcp-client-help").textContent = client === "codex" ? "合并到已有 config.toml，保留其他服务条目。保存后重新加载 MCP，或重新打开客户端；可用 codex mcp list 查看配置。" : "适用于接受 mcpServers 的 JSON 配置文件。合并到已有对象，不要覆盖其他服务；配置位置与重载方式请以客户端说明为准。";
   try {
-    output.textContent = buildMcpConfig(client, document.querySelector("#mcp-python").value, path.value); copy.disabled = false; error.textContent = "配置不包含 API Key；服务地址和 Key 在工具调用时提供。"; path.removeAttribute("aria-invalid");
+    const npxMode = document.querySelector("#mcp-mode").value === "npx";
+    document.querySelectorAll("[data-python-field]").forEach(el => el.classList.toggle("hidden", npxMode));
+    document.querySelectorAll("[data-npx-field]").forEach(el => el.classList.toggle("hidden", !npxMode));
+    output.textContent = npxMode ? buildNpxMcpConfig(client, document.querySelector("#mcp-npx").value, document.querySelector("#mcp-server").value, mcpNpmDownload) : buildMcpConfig(client, document.querySelector("#mcp-python").value, path.value);
+    copy.disabled = false; error.textContent = npxMode ? "请在自己的客户端替换个人 Key 占位符。不要分享含真实 Key 的配置。" : "配置不包含 API Key；服务地址和 Key 在工具调用时提供。"; path.removeAttribute("aria-invalid");
   } catch (failure) {
-    copy.disabled = true; output.textContent = "填写上方路径，生成此电脑可用的配置。"; error.textContent = path.value ? failure.message : "填写脚本路径后即可复制配置。"; if (path.value) path.setAttribute("aria-invalid", "true"); else path.removeAttribute("aria-invalid");
+    copy.disabled = true; output.textContent = "请检查上方配置或等待安装信息加载。"; error.textContent = failure.message; if (path.value) path.setAttribute("aria-invalid", "true"); else path.removeAttribute("aria-invalid");
   }
 }
 
+function buildNpxMcpConfig(client, command, baseURL, packagePath) {
+  if (!packagePath || !/^\/downloads\/design-hub-mcp-\d+\.\d+\.\d+\.tgz$/.test(packagePath)) throw new Error("正在获取安装包版本，请稍后或重试加载。");
+  const url = new URL(baseURL);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("请输入不含凭据或查询参数的 HTTP(S) 服务地址。");
+  command = command.trim();
+  if (!command || /[\x00-\x1f\x7f]/.test(command)) throw new Error("填写 npx 命令或绝对路径。");
+  const args = ["-y", `--package=${url.origin}${packagePath}`, "design-hub-mcp", `--base-url=${url.origin}`];
+  const env = {DESIGN_HUB_API_KEY: "在客户端替换为个人只读Key"};
+  if (client === "json") return JSON.stringify({mcpServers:{"design-hub":{command,args,env}}}, null, 2);
+  if (client === "codex") return `[mcp_servers.design-hub]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}\n\n[mcp_servers.design-hub.env]\nDESIGN_HUB_API_KEY = ${JSON.stringify(env.DESIGN_HUB_API_KEY)}\n`;
+  throw new Error("请选择支持的客户端配置格式。");
+}
+
 function setupConnect() {
+  document.querySelector("#mcp-server").value = location.origin;
   document.querySelectorAll("[data-service-origin]").forEach((el) => { el.textContent = location.origin; });
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
   document.querySelector("#connect-loopback-note").classList.toggle("hidden", !local);
@@ -81,10 +104,11 @@ function setupConnect() {
   }));
   document.querySelectorAll("[data-integration-download]").forEach((link) => link.addEventListener("click", (event) => { if (link.getAttribute("aria-disabled") === "true") event.preventDefault(); }));
   document.querySelector("#retry-integrations").addEventListener("click", () => run(initializeConnect));
-  ["#mcp-client", "#mcp-python", "#mcp-script-path"].forEach((selector) => document.querySelector(selector).addEventListener("input", renderMcpConfig));
+  ["#mcp-client", "#mcp-mode", "#mcp-npx", "#mcp-server", "#mcp-python", "#mcp-script-path"].forEach((selector) => document.querySelector(selector).addEventListener("input", renderMcpConfig));
   document.querySelector("#copy-mcp-config").addEventListener("click", () => run(async () => { if (document.querySelector("#copy-mcp-config").disabled) return; await copyText(document.querySelector("#mcp-config-output").textContent); toast("配置已复制"); }));
   document.querySelector("#copy-mcp-check").addEventListener("click", () => run(async () => {
-    await copyText(`请实际调用 Design Hub MCP 验证接入：\n1. 调用 design_hub_list_projects，base_url 使用 ${location.origin}，api_key 使用我另行提供的个人只读 Key。\n2. 让我提供一个有权限的设计稿完整链接，用 design_hub_get_artboard_context 读取。\n3. 从返回资源中选一个 PNG，调用 design_hub_get_asset 确认读取真实图片。\n请报告每个工具的真实调用结果，不要只根据配置推断成功，不要复述完整 Key。`); toast("验证指引已复制，请在自己的 AI 客户端提供个人 Key");
+    const connection = document.querySelector("#mcp-mode").value === "npx" ? "使用启动配置中的服务地址和 DESIGN_HUB_API_KEY，无需重复传凭据。" : `base_url 使用 ${location.origin}，api_key 使用我另行提供的个人只读 Key。`;
+    await copyText(`请实际调用 Design Hub MCP 验证接入：\n1. 调用 design_hub_list_projects，${connection}\n2. 让我提供一个有权限的设计稿完整链接，用 design_hub_get_artboard_context 读取。\n3. 从返回资源中选一个 PNG，调用 design_hub_get_asset 确认读取真实图片。\n请报告真实调用结果，不要只根据配置推断成功，不要复述完整 Key。`); toast("验证指引已复制");
   }));
   renderMcpConfig();
 }

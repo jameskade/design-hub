@@ -2,7 +2,7 @@
 
 **把 Sketch 设计稿、版本、标注与资源，交到团队和 AI 手中。**
 
-当前发布版本：`v1.0.1`。服务端、网页接入信息和 Sketch 插件随整体版本配套发布；同一轮开发/验收不逐次递增插件版本。Git tag 标记交付代码，提交号用于区分开发中的修改。
+当前开发版本：`1.0.2`，最近发布 tag：`v1.0.1`。服务端、网页接入信息、MCP 包和 Sketch 插件随整体版本配套发布；同一轮开发/验收不逐次递增插件版本。Git tag 标记交付代码，提交号用于区分开发中的修改。
 
 `1.0.1` 修复 Sketch 进度窗口关闭生命周期、分批上传资源与上传目标 ID 跨定时器保存。资源在服务端暂存，批次数和总数核对后才发布画板新版本；单画板暂存上限 2GB，未完成暂存在后续上传请求时按一天过期清理。请先更新服务端再安装配套插件。
 
@@ -41,11 +41,13 @@ Design Hub 是可自部署的设计交付工具：设计师从 Sketch 同步选�
 
 ## macOS 快速部署
 
-需要 Python 3.9+、macOS 自带的 launchd、curl、lsof；JPG 转换使用系统 sips。服务与 MCP 使用 Python 标准库，网页不需要 Node 构建。Sketch 只需要安装在设计师的电脑上。
+需要 Python 3.9+、macOS 自带的 launchd、curl、lsof；JPG 转换使用系统 sips。服务使用 cryptography 加密可回看的个人 Key，Python MCP 仍仅使用标准库，网页不需要 Node 构建。Sketch 只需要安装在设计师的电脑上。
 
 下载源码并进入仓库目录后运行：
 
 ```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ./gh_design_hub prepare
 ./gh_design_hub start
 ./gh_design_hub credentials
@@ -78,16 +80,32 @@ gh_design_hub status
 
 Sketch 使用流程：下载 ZIP → 解压并双击 `DesignHub.sketchplugin` → 在 Sketch 中配置服务地址 → 选中画板 → 上传并选择项目与目录。安装包版本读取仓库内 manifest，网页下载与当前部署配套。管理员也可在自己的 Mac 运行 `./install_sketch_plugin.sh` 安装。
 
-两个公开下载地址只提供应用安装文件，不包含账号、数据库、设计稿和 Key：
+公开下载地址只提供白名单安装文件，不包含账号、数据库、设计稿和 Key：
 
 ```text
 /downloads/DesignHub.sketchplugin.zip
 /downloads/design_hub_mcp.py
+/downloads/design-hub-mcp-1.0.2.tgz
 ```
 
 ## MCP 接入
 
-当前实现是**本地 stdio MCP**，不是网站上的远程 `/mcp` 端点。脚本由 AI 客户端在本机启动，通过 HTTP(S) 连接 Design Hub。提供 Python 3 即可，不需要第三方 Python 包。
+当前实现是**本地 stdio MCP**，不是网站上的远程 `/mcp` 端点。推荐 Node.js 18+（含 npm/npx）：客户端从部署服务器自动下载并启动，无公共 npm 发布、无第三方依赖、无需 Python。
+
+打开服务器的 `/connect/mcp`，默认生成 npx 配置。将示例 IP 替换为同事能访问的服务器地址；Key 占位符只在自己的客户端替换，不发给他人：
+
+```toml
+[mcp_servers.design-hub]
+command = "npx"
+args = ["-y", "--package=http://192.168.1.100:8765/downloads/design-hub-mcp-1.0.2.tgz", "design-hub-mcp", "--base-url=http://192.168.1.100:8765"]
+
+[mcp_servers.design-hub.env]
+DESIGN_HUB_API_KEY = "替换为个人只读Key"
+```
+
+Windows 可用 `npx.cmd`；客户端找不到命令时填写 npx 绝对路径。地址也支持 `DESIGN_HUB_BASE_URL` 环境变量。Node 模式可省略工具里的连接参数；环境变量 Key 不允许通过工具参数被转发到另一服务。安装包由服务器白名单源码生成，包版本必须与部署版本一致；更新后重新复制对应版本配置，老版本 URL 不保证继续提供。只从可信的服务器下载安装包；跨不可信网络应使用 HTTPS。
+
+Python 兼容方式：提供 Python 3 即可，不需要第三方 Python 包。
 
 在网页 `/connect/mcp` 下载脚本后，填写它在运行 AI 客户端的电脑上的绝对路径，生成 Codex TOML 或接受 `mcpServers` 的客户端 JSON 配置。不要把服务器路径填入另一台电脑的配置。
 
@@ -107,7 +125,7 @@ args = ["/absolute/path/design_hub_mcp.py"]
 | `design_hub_get_artboard_context` | 上述参数，加 `artboard` | 画板、版本、图层、文字、样式、坐标与资源；`artboard` 支持完整网页链接 |
 | `design_hub_get_asset` | 上述连接参数，加 `asset_id` | 图片资源内容 |
 
-Key 在网页 MCP 页登录后创建，绑定当前用户并实时继承项目权限；完整值只在创建时显示一次，服务端只保存哈希。脚本按每次调用接收服务地址和 Key，配置示例不保存 Key。在自己的 AI 客户端提供凭据，不把密钥放到共享文档、下载地址或页面 URL。
+Key 在网页 MCP 页登录后创建，绑定当前用户并实时继承项目权限。新增 Key 原文经 Fernet 加密保存，仅本人网页会话可再次查看，支持别名/用途修改；认证仍比对哈希。旧版 Key 只有哈希，保持可用但无法恢复原文。撤销会删除密文。上表是 Python 模式的参数要求；Node 模式默认读取启动配置的地址和 Key。不要把密钥放到共享文档、下载地址或页面 URL。
 
 **配置完成不等于接入成功。** 请让 AI 实际执行「列项目 → 读一张有权限画板 → 读取其中一个 PNG」，以工具返回结果为准。网站无法探测另一台电脑上 AI 客户端的 MCP 连接状态。
 
@@ -123,6 +141,10 @@ Key 在网页 MCP 页登录后创建，绑定当前用户并实时继承项目�
 状态面板可能显示初始管理员密码，转发输出前先检查内容。网页重置管理员密码后，以网页中的新密码为准，`.env` 中的初始密码不会自动跟随变更。
 
 数据默认在 `data/`：SQLite 为 `data/design-hub.sqlite3`，设计稿和资源在 `data/projects/`。`.env`、`data/`、`logs/` 均被 Git 忽略。备份需同时包含数据库与资源；停服务后可整体复制 `data/`，不停服务时需使用 SQLite backup API，并保证数据库与资源备份的一致性。
+
+可回看 Key 的主密钥是 `data/.key-encryption.key`（仅服务账号可读写）。必须与数据库一起安全备份；若已有密文而该文件丢失，服务会拒绝解密，不会生成替代密钥。失去主密钥不会撤销已有 Key，但无法回看它们。
+
+项目 Owner/管理员可从项目页删除整个项目到回收站，恢复入口在回收站；永久删除仅管理员。项目及画板回收后，详情、预览、资源、AI 与打包下载不能继续读取。操作历史由管理员全站查看、Owner按负责项目查看，支持操作筛选和游标分页。记录业务变更及API请求结果（包括拒绝、失败、MCP读取、下载），不记录Key/密码/请求正文，也不记录页面滚动等本地交互；旧版缺失事件无法补回。
 
 升级前先备份。保留 `.env` 与数据目录，更新应用代码并重启；有插件更新时，让设计师从同一服务重新下载。尚未提供自动升级、跨版本数据回滚或多节点部署保证。
 

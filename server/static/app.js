@@ -82,6 +82,7 @@ async function initialize() {
 function configureShell() {
   $("#user-badge").textContent = `${state.user.display_name} · ${roleLabel(state.user.role)}`;
   $("#users-button").classList.toggle("hidden", state.user.role !== "admin");
+  $("#audit-button").classList.toggle("hidden", !["admin","designer"].includes(state.user.role));
   $("#new-project-button").classList.toggle("hidden", !["designer", "admin"].includes(state.user.role));
 }
 async function login(event) {
@@ -156,6 +157,7 @@ async function restoreRoute() {
 function showDashboard(push = true) {
   state.navigationEpoch++; state.versionEpoch++; $("#ai-context-link").removeAttribute("href");
   state.project = null; showWorkspace("#dashboard-view"); $("#home-button").classList.add("hidden");
+  $("#delete-project-button").classList.add("hidden");
   $("#topbar-title").textContent = "Design Hub"; $("#crumb").textContent = "项目"; $("#members-button").classList.add("hidden");
   $("#recycle-button").classList.toggle("hidden", !["designer", "admin"].includes(state.user.role));
   shellMode("dashboard"); if (push) setRoute("/");
@@ -171,6 +173,7 @@ async function openProject(projectId, push = true) {
   if (!state.expandedFolders.size && state.folders[0]) state.expandedFolders.add(state.folders[0].id);
   $("#home-button").classList.remove("hidden"); $("#topbar-title").textContent = state.project.name; $("#crumb").textContent = "设计";
   const canEdit = ["editor", "owner", "admin"].includes(state.project.access_role); const canManage = ["owner", "admin"].includes(state.project.access_role);
+  $("#delete-project-button").classList.toggle("hidden", !canManage);
   $("#new-folder-button").classList.toggle("hidden", !canEdit); $("#members-button").classList.toggle("hidden", !canManage); $("#recycle-button").classList.toggle("hidden", !canEdit);
   showWorkspace("#stage-view"); shellMode("stage"); setSidebarCollapsed("stage", innerWidth < 760 || state.stageSidebarCollapsed); renderGroups(); renderStage(); requestAnimationFrame(fitStage); if (push) setRoute(`/projects/${projectId}`);
   } finally { done(); }
@@ -473,7 +476,7 @@ async function exportSelectedAssets(scope) {
   const layer = scope.item.layer; const assets = assetsForLayer(layer); const format = $("#export-format").value; const platform = $("#export-platform").value; const scales = $$("#export-scales input:checked").map((input) => Number(input.value)); if (!scales.length) return toast("至少选择一个倍率");
   const button = $("#export-assets"); button.disabled = true;
   try {
-    if (scope.kind === "composite" || !state.exportIncludeShadows) { const files = []; for (const scale of scales) { const canvas = await renderComposite(scope, scale, format, null, state.exportIncludeShadows); const blob = await new Promise((resolve) => canvas.toBlob(resolve, format === "jpg" ? "image/jpeg" : "image/png", .95)); files.push({ name: assetFilename(layer.name, format, scale, platform), data_base64: await blobBase64(blob) }); } const packaged = await api("/api/exports/package", { method: "POST", body: { name: `${layer.name || "assets"}-${platform}.zip`, files } }); triggerDownload(packaged.download_url, packaged.filename); toast(`已导出 ${files.length} 个切图`); return; }
+    if (scope.kind === "composite" || !state.exportIncludeShadows) { const files = []; for (const scale of scales) { const canvas = await renderComposite(scope, scale, format, null, state.exportIncludeShadows); const blob = await new Promise((resolve) => canvas.toBlob(resolve, format === "jpg" ? "image/jpeg" : "image/png", .95)); files.push({ name: assetFilename(layer.name, format, scale, platform), data_base64: await blobBase64(blob) }); } const packaged = await api("/api/exports/package", { method: "POST", body: { artboard_id: state.artboard.id, name: `${layer.name || "assets"}-${platform}.zip`, files } }); triggerDownload(packaged.download_url, packaged.filename); toast(`已导出 ${files.length} 个切图`); return; }
     const parameters = new URLSearchParams({ layer_id: layerId(layer), name: layer.name || assets[0]?.name || "asset", format, platform, scales: scales.join(",") }); triggerDownload(`/api/versions/${state.version.version.id}/export?${parameters}`, `${layer.name || "assets"}-${platform}.zip`); toast(`正在导出 ${scales.length} 个切图`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
@@ -555,7 +558,7 @@ async function copyAiLink() {
 
 async function createProject() { const values = await promptDialog("新建项目", [{ name: "name", label: "项目名称", required: true }, { name: "description", label: "说明" }]); if (!values) return; const result = await api("/api/projects", { method: "POST", body: values }); toast("项目已创建"); await loadProjects(); await openProject(result.id); }
 async function createFolder() { const values = await promptDialog("新建分组", [{ name: "name", label: "分组名称", required: true }]); if (!values) return; await api(`/api/projects/${state.project.id}/folders`, { method: "POST", body: values }); toast("分组已创建"); await openProject(state.project.id, false); }
-function promptDialog(title, fields) { const dialog = $("#simple-dialog"); dialog.returnValue = "cancel"; $("#dialog-title").textContent = title; $("#dialog-content").innerHTML = fields.map((field) => `<label>${escapeHtml(field.label)}<input name="${escapeHtml(field.name)}" ${field.type === "password" ? 'type="password" minlength="8" autocomplete="new-password"' : ""} ${field.required ? "required" : ""}></label>`).join(""); dialog.showModal(); return new Promise((resolve) => dialog.addEventListener("close", () => { resolve(dialog.returnValue === "default" ? Object.fromEntries(new FormData($("#dialog-form"))) : null); $("#dialog-form").reset(); }, { once: true })); }
+function promptDialog(title, fields, confirmLabel = "保存") { const dialog = $("#simple-dialog"); dialog.returnValue = "cancel"; $("#dialog-title").textContent = title; $("#dialog-confirm").textContent = confirmLabel; $("#dialog-content").innerHTML = fields.map((field) => `<label>${escapeHtml(field.label)}<input name="${escapeHtml(field.name)}" value="${escapeHtml(field.value || '')}" ${field.maxLength ? `maxlength="${Number(field.maxLength)}"` : ''} ${field.type === "password" ? 'type="password" minlength="8" autocomplete="new-password"' : ""} ${field.required ? "required" : ""}></label>`).join(""); dialog.showModal(); return new Promise((resolve) => dialog.addEventListener("close", () => { resolve(dialog.returnValue === "default" ? Object.fromEntries(new FormData($("#dialog-form"))) : null); $("#dialog-form").reset(); }, { once: true })); }
 
 async function openUsers() {
   const result = await api("/api/users"); $("#management-title").textContent = "人员管理";
@@ -567,14 +570,25 @@ async function copyText(text) {
   try { await navigator.clipboard.writeText(text); }
   catch (_) { const area = document.createElement("textarea"); area.value = text; area.style.position = "fixed"; area.style.opacity = "0"; const previous = document.activeElement; (document.querySelector("dialog[open]") || document.body).append(area); area.select(); const copied = document.execCommand("copy"); area.remove(); previous?.focus(); if (!copied) throw new Error("浏览器未允许复制，请使用 HTTPS 或本机地址后重试"); }
 }
-async function openApiKeys(revealed = null) {
+async function openApiKeys() {
   const result = await api("/api/api-keys"); const dialog = $("#management-dialog"); $("#management-title").textContent = "AI API Key";
-  const created = revealed ? `<section class="api-key-created"><strong>请立即复制，关闭后无法再次查看完整 Key</strong><code>${escapeHtml(revealed.token)}</code><button id="copy-api-key" class="primary">复制 API Key</button></section>` : "";
-  $("#management-content").innerHTML = `${created}<p class="management-note">API Key 代表当前用户，实时继承项目查看权限，只允许读取项目、设计稿、AI 布局和资源。</p><div class="member-add"><input id="api-key-name" maxlength="80" placeholder="名称，例如 Codex 本机"><button id="create-api-key" class="primary">创建只读 Key</button></div><table class="management-table"><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody>${result.api_keys.map((key) => `<tr><td>${escapeHtml(key.name)}</td><td><code>${escapeHtml(key.token_prefix)}…</code></td><td>${formatDate(key.created_at)}</td><td>${key.revoked_at ? "已撤销" : "有效 · 只读"}</td><td>${key.revoked_at ? "—" : `<button class="ghost danger" data-revoke-api-key="${key.id}">撤销</button>`}</td></tr>`).join("") || '<tr><td colspan="5">还没有 API Key</td></tr>'}</tbody></table>`;
+  $("#management-content").innerHTML = `<div class="member-add"><button type="button" id="create-api-key" class="primary">创建 Key</button></div><table class="management-table api-key-table"><thead><tr><th>别名</th><th>完整 Key</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${result.api_keys.map((key) => `<tr><td><button type="button" class="ghost" data-edit-api-key="${key.id}" title="点击修改别名" aria-label="修改别名：${escapeHtml(key.name)}">${escapeHtml(key.name)}</button></td><td>${key.token ? `<code class="api-key-value"><span class="api-key-start">${escapeHtml(key.token.slice(0,-8))}</span><span class="api-key-end">${escapeHtml(key.token.slice(-8))}</span></code>` : `<code>${escapeHtml(key.token_prefix)}…</code><small>旧版 Key 原文不可恢复</small>`}</td><td>${formatDate(key.created_at)}</td><td class="api-key-actions"><button type="button" class="secondary" data-copy-api-key="${key.id}" ${key.token ? '' : 'disabled title="旧版 Key 未保存原文，无法复制"'}>复制</button> <button type="button" class="ghost danger" data-revoke-api-key="${key.id}">删除</button></td></tr>`).join("") || '<tr><td colspan="4">还没有 API Key</td></tr>'}</tbody></table>`;
   if (!dialog.open) dialog.showModal();
-  $("#copy-api-key")?.addEventListener("click", async () => { await copyText(revealed.token); toast("API Key 已复制"); });
-  $("#create-api-key").addEventListener("click", async () => { const name = $("#api-key-name").value.trim() || "AI 只读访问"; try { const createdKey = await api("/api/api-keys", { method: "POST", body: { name } }); await openApiKeys(createdKey.api_key); } catch (error) { toast(error.message); } });
-  $$('[data-revoke-api-key]').forEach((button) => button.addEventListener("click", async () => { if (!confirm("撤销后，使用该 Key 的 AI 将立即失去访问权限。确认撤销？")) return; try { await api(`/api/api-keys/${button.dataset.revokeApiKey}`, { method: "DELETE" }); await openApiKeys(); toast("API Key 已撤销"); } catch (error) { toast(error.message); } }));
+  $$('[data-copy-api-key]').forEach(button => button.addEventListener('click', () => run(async () => { await copyText(result.api_keys.find(key => key.id === button.dataset.copyApiKey).token); toast('Key 已复制'); })));
+  $("#create-api-key").addEventListener("click", () => run(() => editApiKeyAlias()));
+  $$('[data-edit-api-key]').forEach(button => button.addEventListener('click', () => run(() => editApiKeyAlias(result.api_keys.find(key => key.id === button.dataset.editApiKey)))));
+  $$('[data-revoke-api-key]').forEach((button) => button.addEventListener("click", async () => { if (!confirm("删除后，此 Key 立即失效并从列表移除，使用它的客户端需要更换 Key。确认删除？")) return; try { await api(`/api/api-keys/${button.dataset.revokeApiKey}`, { method: "DELETE" }); await openApiKeys(); toast("API Key 已删除"); } catch (error) { toast(error.message); } }));
+}
+async function editApiKeyAlias(key = null) {
+  // 先关闭列表弹窗再编辑，避免嵌套表单的提交同时关闭两个对话框。
+  $("#management-dialog").close();
+  try {
+    const values = await promptDialog(key ? "修改 Key 别名" : "创建 Key", [{name:"name",label:"别名（可选，留空使用默认名称）",value:key?.name || "",maxLength:80}], key ? "保存" : "继续");
+    if (!values) return;
+    const name = values.name.trim() || "AI 只读访问";
+    await api(key ? `/api/api-keys/${key.id}` : "/api/api-keys", {method:key ? "PATCH" : "POST",body:key ? {name,purpose:key.purpose || ""} : {name}});
+    toast(key ? "别名已更新" : "Key 已创建");
+  } finally { await openApiKeys(); }
 }
 async function openMembers() {
   const result = await api(`/api/projects/${state.project.id}/members`); $("#management-title").textContent = `${state.project.name} · 项目成员`; const available = result.candidates.filter((candidate) => !result.members.some((member) => member.id === candidate.id));
@@ -584,6 +598,29 @@ async function openMembers() {
   $$('[data-remove-member]').forEach((button) => button.addEventListener("click", async (event) => { event.preventDefault(); if (!confirm("确认移除该项目成员？")) return; try { await api(`/api/projects/${state.project.id}/members/${button.dataset.removeMember}`, { method: "DELETE" }); button.closest("tr").remove(); toast("项目成员已移除"); } catch (error) { toast(error.message); } }));
 }
 async function deleteCurrentArtboard() { if (!confirm(`将“${state.artboard.name}”移入回收站？`)) return; await api(`/api/artboards/${state.artboard.id}`, { method: "DELETE" }); toast("设计稿已移入回收站"); await openProject(state.project.id); }
+async function deleteCurrentProject() {
+  const project = state.project;
+  if (!project || !confirm(`将整个项目“${project.name}”移入回收站？其目录、画板和资源将停止访问，Owner 或管理员可恢复。`)) return;
+  await api(`/api/projects/${project.id}`, {method:'DELETE'});
+  state.artboard = null; showDashboard(); await loadProjects(); toast('整个项目已移入回收站');
+}
+
+async function openAudit(before = null, action = null) {
+  const selectedAction = action === null ? ($('#audit-action')?.value || '') : action;
+  const query = new URLSearchParams({limit:'50'});
+  if (before) query.set('before',before);
+  if (state.project && ['owner','admin'].includes(state.project.access_role)) query.set('project_id',state.project.id);
+  if (selectedAction) query.set('action',selectedAction);
+  const result = await api('/api/audit?' + query);
+  $('#management-title').textContent = state.project && ['owner','admin'].includes(state.project.access_role) ? `${state.project.name} · 操作历史` : state.user.role === 'admin' ? '全站操作历史' : '我负责的项目 · 操作历史';
+  const actions = {'':'全部操作','project.delete':'删除项目','project.restore':'恢复项目','member.upsert':'添加/分配成员','member.update':'修改成员','member.remove':'移除成员','artboard.created':'新增画板','artboard.updated':'更新画板','request.GET':'查看/下载请求','request.POST':'提交/上传请求','request.PATCH':'修改请求','request.DELETE':'删除请求'};
+  const labels = {...actions,'project.create':'创建项目','project.purge':'永久删除项目','folder.create':'创建目录','session.login':'登录','session.logout':'退出','api_key.create':'创建Key','api_key.update':'修改Key说明','api_key.revoke':'撤销Key','artboard.delete':'删除画板','artboard.restore':'恢复画板','artboard.purge':'永久删除画板','user.update':'修改用户','user.register':'注册'};
+  $('#management-content').innerHTML = `<p class="management-note">记录业务变更及 API 请求结果，包含失败、MCP 读取和下载；不记录 Key、密码或请求正文。旧版未记录的历史无法补回。</p><label>操作筛选<select id="audit-action">${Object.entries(actions).map(([key,label])=>`<option value="${key}" ${key===selectedAction?'selected':''}>${label}</option>`).join('')}</select></label><table class="management-table"><thead><tr><th>时间 / 操作人</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody>${result.logs.map(log=>`<tr><td>${formatDate(log.created_at)}<br>${escapeHtml(log.actor_name || '未认证请求')}</td><td>${escapeHtml(labels[log.action] || log.action)}</td><td>${escapeHtml(log.object_type)}<br>${escapeHtml(log.object_id || '')}</td><td><code class="key-value">${escapeHtml(log.details_json)}</code></td></tr>`).join('') || '<tr><td colspan="4">暂无操作记录</td></tr>'}</tbody></table><div class="member-add"><button id="audit-first" class="secondary">返回最新</button><button id="audit-next" class="secondary" ${result.next_cursor ? '' : 'disabled'}>更早记录</button></div>`;
+  if (!$('#management-dialog').open) $('#management-dialog').showModal();
+  $('#audit-action').addEventListener('change',()=>run(()=>openAudit(null,$('#audit-action').value)));
+  $('#audit-first').onclick=()=>run(()=>openAudit(null,selectedAction));
+  $('#audit-next').onclick=()=>run(()=>openAudit(result.next_cursor,selectedAction));
+}
 async function openRecycle() {
   const result = await api("/api/recycle"); $("#management-title").textContent = "回收站";
   const projectRows = result.projects.map((project) => `<tr><td>项目</td><td>${escapeHtml(project.name)}</td><td>${formatDate(project.deleted_at)}</td><td><button class="secondary" data-restore-project="${project.id}">恢复</button>${state.user.role === "admin" ? ` <button class="ghost danger" data-purge-project="${project.id}">永久删除</button>` : ""}</td></tr>`).join(""); const boardRows = result.artboards.map((board) => `<tr><td>设计稿</td><td>${escapeHtml(board.name)}</td><td>${formatDate(board.deleted_at)}</td><td><button class="secondary" data-restore-board="${board.id}">恢复</button>${state.user.role === "admin" ? ` <button class="ghost danger" data-purge-board="${board.id}">永久删除</button>` : ""}</td></tr>`).join("");
@@ -600,6 +637,8 @@ function formatDate(value) { return new Date(value).toLocaleString("zh-CN", { mo
 $$('[data-auth-tab]').forEach((button) => button.addEventListener("click", () => { $$('[data-auth-tab]').forEach((tab) => { tab.classList.toggle("active", tab === button); tab.setAttribute("aria-pressed", tab === button); }); $("#login-form").classList.toggle("hidden", button.dataset.authTab !== "login"); $("#register-form").classList.toggle("hidden", button.dataset.authTab !== "register"); $("#auth-message").textContent = ""; reveal($(`#${button.dataset.authTab}-form`)); }));
 $("#login-form").addEventListener("submit", login); $("#register-form").addEventListener("submit", register); $("#logout-button").addEventListener("click", logout); $("#pending-logout").addEventListener("click", logout);
 $("#home-button").addEventListener("click", () => showDashboard());
+$("#delete-project-button").addEventListener("click", () => run(deleteCurrentProject));
+$("#audit-button").addEventListener("click", () => run(() => openAudit(null,'')));
 for (const [selector, action] of [["#new-project-button", createProject], ["#new-folder-button", createFolder], ["#users-button", openUsers], ["#api-keys-button", () => openApiKeys()], ["#members-button", openMembers], ["#recycle-button", openRecycle], ["#copy-screen-prompt", copyScreenPrompt], ["#copy-ai-link", copyAiLink], ["#delete-artboard", deleteCurrentArtboard]]) $(selector).addEventListener("click", () => run(action));
 $("#back-to-stage").addEventListener("click", () => run(() => openProject(state.project.id))); $("#version-select").addEventListener("change", (event) => run(() => loadVersion(event.target.value))); $("#zoom-range").addEventListener("input", (event) => setZoom(event.target.value));
 $("#stage-fit").addEventListener("click", fitStage); $("#stage-minus").addEventListener("click", () => setStageZoom(state.stageZoom / 1.15)); $("#stage-plus").addEventListener("click", () => setStageZoom(state.stageZoom * 1.15));

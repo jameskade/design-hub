@@ -15,6 +15,8 @@ import sys
 import tempfile
 import threading
 import time
+import tarfile
+import gzip
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from cryptography.fernet import Fernet, InvalidToken
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -254,6 +257,18 @@ def init_database():
             db.execute("ALTER TABLE artboards ADD COLUMN canvas_x REAL NOT NULL DEFAULT 0")
         if "canvas_y" not in columns:
             db.execute("ALTER TABLE artboards ADD COLUMN canvas_y REAL NOT NULL DEFAULT 0")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(api_keys)")}
+        if "purpose" not in columns:
+            db.execute("ALTER TABLE api_keys ADD COLUMN purpose TEXT NOT NULL DEFAULT ''")
+        if "encrypted_token" not in columns:
+            db.execute("ALTER TABLE api_keys ADD COLUMN encrypted_token TEXT")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(audit_logs)")}
+        if "project_id" not in columns:
+            db.execute("ALTER TABLE audit_logs ADD COLUMN project_id TEXT")
+            db.execute("UPDATE audit_logs SET project_id=object_id WHERE object_type='project'")
+            db.execute("UPDATE audit_logs SET project_id=substr(object_id,1,36) WHERE object_type='project_member'")
+            db.execute("UPDATE audit_logs SET project_id=(SELECT project_id FROM artboards WHERE id=audit_logs.object_id) WHERE object_type='artboard'")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_audit_project_id ON audit_logs(project_id,id)")
 
 
 def ensure_initial_admin():
@@ -311,23 +326,46 @@ def project_role(db, user, project_id):
         "SELECT role FROM project_members WHERE project_id = ? AND user_id = ?",
         (project_id, user["id"]),
     ).fetchone()
-    return row["role"] if row else None
+    return ("viewer" if user["role"] == "developer" else row["role"]) if row else None
 
 
-def require_project_role(db, user, project_id, allowed):
+def require_project_role(db, user, project_id, allowed, include_deleted=False):
     role = project_role(db, user, project_id)
     if role not in allowed:
         raise ApiError(403, "没有该项目的操作权限")
+    project = db.execute("SELECT deleted_at FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not project or (project["deleted_at"] and not include_deleted):
+        raise ApiError(404, "项目不存在或已移入回收站")
     return role
 
 
 def audit(db, actor_id, action, object_type, object_id=None, details=None):
+    details = details or {}
+    project_id = details.get("project_id")
+    if object_type == "project":
+        project_id = object_id
+    elif object_type == "project_member":
+        project_id = str(object_id).split(":")[0]
+    elif object_type == "artboard":
+        row = db.execute("SELECT project_id FROM artboards WHERE id=?", (object_id,)).fetchone()
+        project_id = row[0] if row else project_id
     db.execute(
         """INSERT INTO audit_logs
-           (actor_id, action, object_type, object_id, details_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (actor_id, action, object_type, object_id, canonical_json(details or {}), utc_now()),
+           (actor_id, action, object_type, object_id, details_json, created_at, project_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (actor_id, action, object_type, object_id, canonical_json(details), utc_now(), project_id),
     )
+
+
+def key_cipher(db):
+    path = DATA_DIR / '.key-encryption.key'
+    if not path.exists():
+        # 丢失主密钥时禁止生成替代密钥；已有密文必须通过备份恢复。
+        if db.execute("SELECT 1 FROM api_keys WHERE encrypted_token IS NOT NULL LIMIT 1").fetchone():
+            raise ApiError(503, "Key 加密密钥缺失，请管理员恢复备份")
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as handle:
+            handle.write(Fernet.generate_key())
+    return Fernet(path.read_bytes())
 
 
 def decode_file(value, label):
@@ -451,6 +489,9 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def _dispatch(self, method):
+        self._audit_user = None
+        self._audit_status = 500
+        self._audit_kind = None
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
@@ -463,7 +504,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 self._integration_source("design_hub_mcp.py")
                 return self._json(200, {
                     "sketch": {"version": manifest["version"], "compatible_version": manifest.get("compatibleVersion"), "download_url": "/downloads/DesignHub.sketchplugin.zip"},
-                    "mcp": {"transport": "stdio", "download_url": "/downloads/design_hub_mcp.py"},
+                    "mcp": {"transport": "stdio", "download_url": "/downloads/design_hub_mcp.py", "npm_download_url": f"/downloads/design-hub-mcp-{APP_VERSION}.tgz", "version": APP_VERSION},
                 })
             if path.startswith("/downloads/"):
                 if method != "GET":
@@ -486,6 +527,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 
             if path.startswith("/api/"):
                 user, session = self._authenticate()
+                self._audit_user = user["id"]
+                self._audit_kind = session["kind"]
                 if method in {"POST", "PATCH", "DELETE"}:
                     self._check_csrf(session)
                 return self._api(method, path, query, user, session)
@@ -495,6 +538,39 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         except Exception as error:
             self.log_error("Unhandled error: %r", error)
             return self._json(500, {"error": "服务处理请求失败"})
+        finally:
+            self._record_request(method)
+
+    def send_response(self, code, message=None):
+        self._audit_status = code
+        super().send_response(code, message)
+
+    def _record_request(self, method):
+        path = urlparse(self.path).path.rstrip('/')
+        if not path.startswith('/api/') or path in {'/api/health','/api/integrations','/api/me','/api/audit'}:
+            return
+        parts = path.strip('/').split('/')
+        # 不记录 body、查询参数、Authorization、Key 原文；未知路径片段不写入日志。
+        route_words = {'api','projects','folders','artboards','versions','assets','uploads','upload','chunk','commit','cancel','members','users','api-keys','login','plugin','logout','register','restore','purge','preview','download','export','exports','package','ai-context','recycle'}
+        safe_path = '/' + '/'.join(p if p in route_words or re.fullmatch(r'[0-9a-f-]{36}',p) else '[invalid]' for p in parts)
+        try:
+            with WRITE_LOCK, db_connection() as db:
+                project_id = None
+                if len(parts) >= 3:
+                    identifier = parts[2]
+                    if parts[1] == 'projects' and re.fullmatch(r'[0-9a-f-]{36}',identifier):
+                        project_id = identifier
+                    elif parts[1] in {'artboards','versions','assets'}:
+                        sql = {
+                            'artboards':'SELECT project_id FROM artboards WHERE id=?',
+                            'versions':'SELECT a.project_id FROM artboard_versions v JOIN artboards a ON a.id=v.artboard_id WHERE v.id=?',
+                            'assets':'SELECT a.project_id FROM assets s JOIN artboard_versions v ON v.id=s.version_id JOIN artboards a ON a.id=v.artboard_id WHERE s.id=?',
+                        }[parts[1]]
+                        row = db.execute(sql,(identifier,)).fetchone()
+                        project_id = row[0] if row else None
+                audit(db,self._audit_user,'request.'+method,'request',safe_path,{'status':self._audit_status,'auth_kind':self._audit_kind,'project_id':project_id})
+        except Exception:
+            self.log_error('Audit write failed')
 
     def _read_json(self):
         try:
@@ -560,6 +636,20 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         return source.read_bytes()
 
     def _download_integration(self, path):
+        if path == f"/downloads/design-hub-mcp-{APP_VERSION}.tgz":
+            archive = io.BytesIO()
+            # 固定包内容与时间戳，不调用 npm、不打包仓库/凭据，客户端无需公网依赖。
+            with gzip.GzipFile(fileobj=archive, mode="wb", mtime=0) as compressed:
+                with tarfile.open(fileobj=compressed, mode="w") as bundle:
+                    for name in ("package.json", "cli.cjs"):
+                        source = self._integration_source(f"mcp-node/{name}")
+                        if name == "package.json" and json.loads(source)["version"] != APP_VERSION:
+                            raise ApiError(503, "MCP 包版本与服务版本不一致")
+                        entry = tarfile.TarInfo(f"package/{name}")
+                        entry.size = len(source)
+                        entry.mode = 0o755 if name == "cli.cjs" else 0o644
+                        bundle.addfile(entry, io.BytesIO(source))
+            return self._download_bytes(archive.getvalue(), f"design-hub-mcp-{APP_VERSION}.tgz")
         if path == "/downloads/design_hub_mcp.py":
             return self._download_bytes(self._integration_source("design_hub_mcp.py"), "design_hub_mcp.py")
         if path == "/downloads/DesignHub.sketchplugin.zip":
@@ -604,6 +694,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             if user["role"] == "disabled":
                 raise ApiError(403, "账号已被禁用")
             token, csrf, expires_at = create_session(db, user["id"], kind)
+            self._audit_user = user["id"]
+            self._audit_kind = kind
             audit(db, user["id"], "session.login", "session", details={"kind": kind})
         payload = {
             "user": public_user(user),
@@ -690,6 +782,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if user["role"] == "pending":
             raise ApiError(403, "账号正在等待管理员审核")
 
+        if parts[:2] == ["api", "api-keys"] and session["kind"] != "web":
+            raise ApiError(403, "请在本人登录的网页中管理 Key")
         if path == "/api/api-keys":
             if method == "GET":
                 return self._list_api_keys(user)
@@ -697,6 +791,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 return self._create_api_key(user)
         if len(parts) == 3 and parts[:2] == ["api", "api-keys"] and method == "DELETE":
             return self._revoke_api_key(user, parts[2])
+        if len(parts) == 3 and parts[:2] == ["api", "api-keys"] and method == "PATCH":
+            return self._update_api_key(user, parts[2])
 
         if path == "/api/users" and method == "GET":
             return self._list_users(user)
@@ -767,6 +863,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if path == "/api/recycle" and method == "GET":
             return self._recycle(user)
         if path == "/api/audit" and method == "GET":
+            if session["kind"] != "web":
+                raise ApiError(403, "请在网页中查看操作历史")
             return self._audit_logs(user, query)
         raise ApiError(404, "接口不存在")
 
@@ -800,7 +898,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 ).fetchone()[0]
                 if owned:
                     raise ApiError(409, "该用户仍是项目 Owner，请先转让项目")
-            if target["role"] == "admin" and role != "admin":
+            if target["role"] == "admin" and role is not None and role != "admin":
                 admin_count = db.execute(
                     "SELECT COUNT(*) FROM users WHERE role = 'admin'"
                 ).fetchone()[0]
@@ -827,17 +925,35 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         return self._json(200, {"user": public_user(result)})
 
     def _list_api_keys(self, user):
-        with db_connection() as db:
+        with WRITE_LOCK, db_connection() as db:
             rows = db.execute(
-                """SELECT id, name, token_prefix, created_at, revoked_at
-                   FROM api_keys WHERE user_id = ? ORDER BY created_at DESC""",
+                """SELECT id, name, purpose, token_prefix, encrypted_token, created_at, revoked_at
+                   FROM api_keys WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC""",
                 (user["id"],),
             ).fetchall()
-        return self._json(200, {"api_keys": [dict(row) for row in rows]})
+            keys = []
+            for row in rows:
+                item = dict(row)
+                encrypted = item.pop("encrypted_token")
+                item["token"] = None
+                item["recoverable"] = bool(encrypted) and not item["revoked_at"]
+                if item["recoverable"]:
+                    try:
+                        decoded = json.loads(key_cipher(db).decrypt(encrypted.encode()).decode())
+                        if decoded["user_id"] != user["id"]:
+                            raise InvalidToken()
+                        item["token"] = decoded["token"]
+                    except (InvalidToken, ValueError, KeyError):
+                        raise ApiError(503, "Key 无法解密，请管理员检查加密密钥备份")
+                keys.append(item)
+        return self._json(200, {"api_keys": keys})
 
     def _create_api_key(self, user):
         data = self._read_json()
         name = str(data.get("name") or "AI 只读访问").strip()
+        purpose = str(data.get("purpose") or "").strip()
+        if len(purpose) > 300:
+            raise ApiError(400, "用途说明最多300字")
         if not 1 <= len(name) <= 80:
             raise ApiError(400, "API Key 名称长度必须为 1–80 个字符")
         token = "dhk_" + secrets.token_urlsafe(32)
@@ -850,13 +966,28 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             ).fetchone()[0]
             if active >= 10:
                 raise ApiError(409, "每个用户最多保留 10 个有效 API Key")
+            encrypted = key_cipher(db).encrypt(canonical_json({"user_id": user["id"], "token": token}).encode()).decode()
             db.execute(
-                """INSERT INTO api_keys (id, user_id, name, token_hash, token_prefix, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (key_id, user["id"], name, hash_token(token), token[:12], now),
+                """INSERT INTO api_keys (id, user_id, name, purpose, token_hash, token_prefix, encrypted_token, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (key_id, user["id"], name, purpose, hash_token(token), token[:12], encrypted, now),
             )
             audit(db, user["id"], "api_key.create", "api_key", key_id, {"name": name, "prefix": token[:12]})
         return self._json(201, {"api_key": {"id": key_id, "name": name, "prefix": token[:12], "token": token, "scope": "read", "created_at": now}})
+
+    def _update_api_key(self, user, key_id):
+        data = self._read_json()
+        name = str(data.get("name") or "").strip()
+        purpose = str(data.get("purpose") or "").strip()
+        if not 1 <= len(name) <= 80 or len(purpose) > 300:
+            raise ApiError(400, "别名需1–80字，用途说明最多300字")
+        with WRITE_LOCK, db_connection() as db:
+            row = db.execute("SELECT name,purpose FROM api_keys WHERE id=? AND user_id=?", (key_id,user["id"])).fetchone()
+            if not row:
+                raise ApiError(404, "API Key 不存在")
+            db.execute("UPDATE api_keys SET name=?,purpose=? WHERE id=?", (name,purpose,key_id))
+            audit(db,user["id"],"api_key.update","api_key",key_id,{"name_changed": row["name"] != name,"purpose_changed": row["purpose"] != purpose})
+        return self._json(200,{"status":"updated"})
 
     def _revoke_api_key(self, user, key_id):
         with WRITE_LOCK, db_connection() as db:
@@ -867,7 +998,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             if not row:
                 raise ApiError(404, "API Key 不存在")
             if not row["revoked_at"]:
-                db.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ?", (utc_now(), key_id))
+                db.execute("UPDATE api_keys SET revoked_at = ?, encrypted_token = NULL WHERE id = ?", (utc_now(), key_id))
                 audit(db, user["id"], "api_key.revoke", "api_key", key_id, {"prefix": row["token_prefix"]})
         return self._json(200, {"status": "revoked"})
 
@@ -932,7 +1063,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 
     def _restore_project(self, user, project_id):
         with WRITE_LOCK, db_connection() as db:
-            require_project_role(db, user, project_id, {"owner", "admin"})
+            require_project_role(db, user, project_id, {"owner", "admin"}, include_deleted=True)
             db.execute("UPDATE projects SET deleted_at = NULL, updated_at = ? WHERE id = ?", (utc_now(), project_id))
             audit(db, user["id"], "project.restore", "project", project_id)
         return self._json(200, {"status": "restored"})
@@ -1009,6 +1140,11 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 raise ApiError(400, "只能添加已审核且启用的用户")
             if target["role"] == "developer" and role != "viewer":
                 raise ApiError(400, "开发人员只能被授权为 Viewer")
+            current = db.execute("SELECT role FROM project_members WHERE project_id=? AND user_id=?", (project_id,target_id)).fetchone()
+            if current and current["role"] == "owner" and role != "owner":
+                owners = db.execute("SELECT COUNT(*) FROM project_members WHERE project_id=? AND role='owner'", (project_id,)).fetchone()[0]
+                if owners <= 1:
+                    raise ApiError(409, "项目至少需要一名 Owner")
             now = utc_now()
             db.execute(
                 """INSERT INTO project_members (project_id, user_id, role, created_at, updated_at)
@@ -1274,7 +1410,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 
     def _artboard_detail(self, user, artboard_id):
         with db_connection() as db:
-            board = db.execute("SELECT * FROM artboards WHERE id = ?", (artboard_id,)).fetchone()
+            board = db.execute("SELECT * FROM artboards WHERE id = ? AND deleted_at IS NULL", (artboard_id,)).fetchone()
             if not board:
                 raise ApiError(404, "画板不存在")
             role = require_project_role(db, user, board["project_id"], {"viewer", "editor", "owner", "admin"})
@@ -1335,7 +1471,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             version = db.execute(
                 """SELECT artboard_versions.*, artboards.project_id, artboards.name AS artboard_name
                    FROM artboard_versions JOIN artboards ON artboards.id = artboard_versions.artboard_id
-                   WHERE artboard_versions.id = ?""",
+                   WHERE artboard_versions.id = ? AND artboards.deleted_at IS NULL""",
                 (version_id,),
             ).fetchone()
             if not version:
@@ -1388,7 +1524,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             row = db.execute(
                 """SELECT artboard_versions.preview_path, artboards.project_id, artboards.name
                    FROM artboard_versions JOIN artboards ON artboards.id = artboard_versions.artboard_id
-                   WHERE artboard_versions.id = ?""",
+                   WHERE artboard_versions.id = ? AND artboards.deleted_at IS NULL""",
                 (version_id,),
             ).fetchone()
             if not row:
@@ -1403,7 +1539,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                    FROM assets
                    JOIN artboard_versions ON artboard_versions.id = assets.version_id
                    JOIN artboards ON artboards.id = artboard_versions.artboard_id
-                   WHERE assets.id = ?""",
+                   WHERE assets.id = ? AND artboards.deleted_at IS NULL""",
                 (asset_id,),
             ).fetchone()
             if not row:
@@ -1427,7 +1563,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             version = db.execute(
                 """SELECT artboard_versions.id, artboards.project_id
                    FROM artboard_versions JOIN artboards ON artboards.id = artboard_versions.artboard_id
-                   WHERE artboard_versions.id = ?""",
+                   WHERE artboard_versions.id = ? AND artboards.deleted_at IS NULL""",
                 (version_id,),
             ).fetchone()
             if not version:
@@ -1483,6 +1619,11 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 
     def _package_exports(self, user):
         data = self._read_json()
+        with db_connection() as db:
+            board = db.execute("SELECT id, project_id FROM artboards WHERE id=? AND deleted_at IS NULL", (str(data.get('artboard_id') or ''),)).fetchone()
+            if not board:
+                raise ApiError(404, "请从有效设计稿生成打包下载")
+            require_project_role(db,user,board['project_id'],{'viewer','editor','owner','admin'})
         files = data.get("files")
         archive_name = str(data.get("name") or "assets.zip")[:160]
         if not isinstance(files, list) or not 1 <= len(files) <= 12:
@@ -1506,7 +1647,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
             for filename, body in decoded:
                 bundle.writestr(filename, body)
-        audit_details = {"files": len(decoded), "bytes": total, "name": archive_name}
+        audit_details = {"files": len(decoded), "bytes": total, "name": archive_name, "project_id":board['project_id'], "artboard_id":board['id']}
         with WRITE_LOCK, db_connection() as db:
             audit(db, user["id"], "asset.package", "export", token, audit_details)
         return self._json(201, {"download_url": f"/api/exports/{token}?filename={quote(archive_name)}", "filename": archive_name})
@@ -1514,6 +1655,15 @@ class DesignHubHandler(BaseHTTPRequestHandler):
     def _download_export(self, user, token, query):
         if not token or any(character not in "0123456789abcdef-" for character in token.lower()):
             raise ApiError(404, "导出文件不存在")
+        with db_connection() as db:
+            logged = db.execute("SELECT actor_id,details_json FROM audit_logs WHERE object_type='export' AND object_id=? AND action='asset.package' ORDER BY id DESC LIMIT 1", (token,)).fetchone()
+            if not logged or logged['actor_id'] != user['id']:
+                raise ApiError(403,"只能下载本人生成的资源包")
+            details = json.loads(logged['details_json'])
+            board = db.execute("SELECT project_id FROM artboards WHERE id=? AND deleted_at IS NULL", (details.get('artboard_id'),)).fetchone()
+            if not board:
+                raise ApiError(404,"设计稿已删除或旧下载已失效，请重新导出")
+            require_project_role(db,user,board['project_id'],{'viewer','editor','owner','admin'})
         target = EXPORT_CACHE_DIR / f"{token}.zip"
         if not target.is_file():
             raise ApiError(404, "导出文件已过期")
@@ -1552,17 +1702,33 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         return self._json(200, {"projects": [dict(row) for row in projects], "artboards": [dict(row) for row in boards]})
 
     def _audit_logs(self, user, query):
-        if user["role"] != "admin":
-            raise ApiError(403, "只有管理员可以查看全站审计日志")
-        limit = min(max(int((query.get("limit") or [100])[0]), 1), 500)
+        try:
+            limit = min(max(int((query.get("limit") or [50])[0]), 1), 100)
+            before = int((query.get("before") or [0])[0])
+        except ValueError:
+            raise ApiError(400,"分页参数无效")
+        project_id = (query.get('project_id') or [''])[0]
+        action = (query.get('action') or [''])[0]
         with db_connection() as db:
+            clauses = []; values = []
+            if project_id:
+                require_project_role(db,user,project_id,{'owner','admin'},include_deleted=True)
+                clauses.append('audit_logs.project_id=?'); values.append(project_id)
+            elif user['role'] != 'admin':
+                clauses.append("audit_logs.project_id IN (SELECT project_id FROM project_members WHERE user_id=? AND role='owner')")
+                values.append(user['id'])
+            if before:
+                clauses.append('audit_logs.id<?'); values.append(before)
+            if action:
+                clauses.append('audit_logs.action=?'); values.append(action)
+            where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
             rows = db.execute(
                 """SELECT audit_logs.*, users.display_name AS actor_name
                    FROM audit_logs LEFT JOIN users ON users.id = audit_logs.actor_id
-                   ORDER BY audit_logs.id DESC LIMIT ?""",
-                (limit,),
+                """ + where + " ORDER BY audit_logs.id DESC LIMIT ?",
+                (*values,limit+1),
             ).fetchall()
-        return self._json(200, {"logs": [dict(row) for row in rows]})
+        return self._json(200, {"logs": [dict(row) for row in rows[:limit]], "next_cursor":rows[limit-1]['id'] if len(rows)>limit else None})
 
 
 def main():

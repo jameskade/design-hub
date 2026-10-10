@@ -8,7 +8,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-SERVER_INFO = {"name": "design-hub", "version": "0.1.0"}
+SERVER_INFO = {"name": "design-hub", "version": "1.0.2"}
 ARTBOARD_RE = re.compile(r"/artboards/([0-9a-fA-F-]+)")
 ID_RE = re.compile(r"^[0-9A-Za-z-]+$")
 

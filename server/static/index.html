@@ -66,6 +66,8 @@
         <a class="ghost" href="/connect/mcp" target="_blank" rel="noopener" title="MCP 配置与 API Key" aria-label="MCP 接入" data-icon="plug" data-label="MCP 接入"></a>
         <button id="recycle-button" class="ghost hidden" data-icon="trash" data-label="回收站"></button>
         <button id="members-button" class="ghost hidden" data-icon="users" data-label="项目成员"></button>
+        <button id="delete-project-button" class="ghost danger hidden" data-icon="trash" data-label="删除项目"></button>
+        <button id="audit-button" class="ghost hidden" data-icon="history" data-label="操作历史"></button>
         <button id="users-button" class="ghost hidden" data-icon="settings" data-label="人员管理"></button>
         <span id="user-badge" class="user-badge"></span>
         <button id="logout-button" class="icon-button" title="退出登录" data-icon="logout" data-label="退出"></button>
@@ -183,20 +185,24 @@
           <div class="connect-main">
             <div class="connect-intro"><span class="connect-eyebrow">给开发者与 AI</span><h2 id="mcp-heading" tabindex="-1">让 AI 读到设计的细节。</h2><p>通过 MCP 获取图层、文字、样式与真实资源，给实现提供结构化依据。</p></div>
             <ol class="connect-steps">
-              <li><span class="step-number">1</span><div><h3>下载到运行 AI 客户端的电脑</h3><p>保存 <code>design_hub_mcp.py</code>，确认本机有 Python 3。脚本只使用 Python 标准库，无需安装额外 Python 包。</p><a class="secondary connect-link-button" data-integration-download href="/downloads/design_hub_mcp.py" download aria-disabled="true" tabindex="-1" data-icon="download" data-label="下载 MCP 脚本"></a></div></li>
-              <li><span class="step-number">2</span><div><h3>按你的路径生成客户端配置</h3><p>这是本地 stdio 接入。客户端启动脚本，脚本再连接 Design Hub；网站地址不是远程 MCP 端点。</p>
+              <li><span class="step-number">1</span><div><h3>确认电脑可运行 npx</h3><p>需要 Node.js 18+（含 npm/npx）。客户端会从本站自动下载安装包，不需要 Python、手动下载脚本或访问公共 npm 仓库。已有 Python 配置也可以继续使用。</p><details><summary>旧版 Python 接入</summary><a class="secondary connect-link-button" data-integration-download href="/downloads/design_hub_mcp.py" download aria-disabled="true" tabindex="-1" data-icon="download" data-label="下载 Python 脚本"></a></details></div></li>
+              <li><span class="step-number">2</span><div><h3>复制客户端配置</h3><p>默认使用服务器地址下载并启动本地 MCP，服务 IP 可修改；网站地址不是远程 MCP 端点。</p>
                 <div class="mcp-config-form">
                   <label>客户端配置格式<select id="mcp-client"><option value="codex">Codex · TOML</option><option value="json">兼容客户端 · mcpServers JSON</option></select></label>
-                  <label>Python 命令或解释器路径<input id="mcp-python" value="python3" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help"></label>
-                  <label class="wide">脚本在这台电脑上的绝对路径<input id="mcp-script-path" placeholder="/Users/你的用户名/Downloads/design_hub_mcp.py" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help mcp-config-error"></label>
+                  <label>接入方式<select id="mcp-mode"><option value="npx">npx 自动下载安装（推荐）</option><option value="python">Python 脚本（兼容）</option></select></label>
+                  <label data-npx-field>npx 命令或绝对路径<input id="mcp-npx" value="npx" spellcheck="false" autocomplete="off"></label>
+                  <label data-npx-field>Design Hub 服务地址<input id="mcp-server" type="url" spellcheck="false" autocomplete="off"></label>
+                  <label data-python-field class="hidden">Python 命令或解释器路径<input id="mcp-python" value="python3" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help"></label>
+                  <label data-python-field class="wide hidden">脚本在这台电脑上的绝对路径<input id="mcp-script-path" placeholder="/Users/你的用户名/Downloads/design_hub_mcp.py" spellcheck="false" autocomplete="off" aria-describedby="mcp-path-help mcp-config-error"></label>
                 </div>
-                <p id="mcp-path-help" class="step-detail">填写你刚保存的文件路径。请勿使用服务器上的路径或「~」缩写；如果客户端找不到 Python，请填写解释器的绝对路径。</p>
+                <p id="mcp-path-help" data-python-field class="step-detail hidden">填写这台电脑的脚本绝对路径，不使用 ~ 缩写。</p>
+                <p data-npx-field class="step-detail">首次启动需连接服务器下载；升级时重新复制新版本配置。其他同事应填写服务器局域网 IP 或域名，不使用 localhost。若客户端找不到 npx，请填写其绝对路径；Windows 可使用 npx.cmd。</p>
                 <p id="mcp-config-error" class="connect-validation" aria-live="polite">填写脚本路径后即可复制配置。</p>
                 <div class="config-preview"><header><span id="mcp-config-filename">~/.codex/config.toml</span><button id="copy-mcp-config" class="ghost" disabled data-icon="copy" data-label="复制配置"></button></header><pre id="mcp-config-output" tabindex="0">填写上方路径，生成此电脑可用的配置。</pre></div>
                 <p id="mcp-client-help" class="step-detail">合并到已有配置中，保留其他服务条目。保存后，在客户端重新加载 MCP 或重新打开客户端。</p>
                 <a id="mcp-official-docs" class="connect-text-link" href="https://developers.openai.com/codex/mcp" target="_blank" rel="noopener">查看 Codex 官方配置说明 ↗</a>
               </div></li>
-              <li><span class="step-number">3</span><div><h3>提供个人 Key，验证实际调用</h3><p>在「你的个人访问凭据」中创建只读 Key。每次工具调用需要 <code>base_url</code> 和 <code>api_key</code>；Key 通过你自己的 AI 客户端提供，不写入此配置或分享链接。</p><div class="mcp-tool-list"><span><b>列出可见项目</b><code>design_hub_list_projects</code></span><span><b>读取设计上下文</b><code>design_hub_get_artboard_context</code></span><span><b>读取图片资源</b><code>design_hub_get_asset</code></span></div><button id="copy-mcp-check" class="secondary" data-icon="copy" data-label="复制验证指引"></button><p class="step-detail">以 AI 客户端的真实调用结果为准。网页能提供下载与配置说明，无法判断另一台电脑上的 MCP 进程是否已经连接。</p></div></li>
+              <li><span class="step-number">3</span><div><h3>填写个人 Key，验证实际调用</h3><p>在「你的个人访问凭据」中创建只读 Key，在自己的客户端配置中替换 <code>DESIGN_HUB_API_KEY</code> 占位符；npx 模式无需每次调用重复提供地址和 Key。Python 模式仍通过工具参数提供。不要分享包含真实 Key 的配置。</p><div class="mcp-tool-list"><span><b>列出可见项目</b><code>design_hub_list_projects</code></span><span><b>读取设计上下文</b><code>design_hub_get_artboard_context</code></span><span><b>读取图片资源</b><code>design_hub_get_asset</code></span></div><button id="copy-mcp-check" class="secondary" data-icon="copy" data-label="复制验证指引"></button><p class="step-detail">以 AI 客户端的真实调用结果为准。网页不能判断另一台电脑是否已连接。</p></div></li>
             </ol>
           </div>
           <aside class="connect-side">

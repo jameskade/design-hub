@@ -1,0 +1,10 @@
+{
+  "name": "design-hub-mcp",
+  "version": "1.0.2",
+  "description": "Design Hub local stdio MCP client",
+  "bin": { "design-hub-mcp": "cli.cjs" },
+  "engines": { "node": ">=18" },
+  "files": ["cli.cjs"],
+  "license": "UNLICENSED",
+  "private": true
+}

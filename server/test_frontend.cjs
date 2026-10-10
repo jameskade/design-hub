@@ -14,6 +14,54 @@ function declaration(name, code = source) {
   return code.slice(start, end < 0 ? undefined : start + 1 + end);
 }
 const context = vm.createContext({ state: { version: { assets: [] } }, URLSearchParams });
+// 使用真实渲染函数检查四列契约和复制完整值，不读取真实 Key。
+async function verifyKeyList() {
+  const token = 'dhk_TEST_ONLY_' + 'x'.repeat(64);
+  const elements = new Map(); let copyHandler; let copied;
+  const ctx = vm.createContext({
+    api: async () => ({api_keys:[{id:'test',name:'测试别名',token,created_at:'2026-10-10T00:00:00Z'}]}),
+    $: id => { if (!elements.has(id)) elements.set(id,{innerHTML:'',addEventListener(){},showModal(){}}); return elements.get(id); },
+    $$: selector => selector === '[data-copy-api-key]' ? [{dataset:{copyApiKey:'test'},addEventListener:(_,fn)=>{copyHandler=fn;}}] : [],
+    formatDate: () => '2026/10/10', run: fn => fn(), copyText: async text => {copied=text;}, toast() {},
+  });
+  vm.runInContext(declaration('escapeHtml'),ctx);
+  vm.runInContext('async '+declaration('openApiKeys'),ctx);
+  await vm.runInContext('openApiKeys()',ctx);
+  const html=elements.get('#management-content').innerHTML;
+  assert.deepEqual([...html.matchAll(/<th>(.*?)<\/th>/g)].map(m=>m[1]),['别名','完整 Key','创建时间','操作']);
+  assert(!html.includes('保存说明') && !html.includes('api-key-purpose'));
+  assert(html.includes('>复制</button>') && html.includes('>删除</button>'));
+  await copyHandler(); assert.equal(copied,token);
+  console.log('PASS: Key列表四列、复制完整值、仅复制和删除操作');
+}
+verifyKeyList().catch(error=>{console.error(error);process.exitCode=1;});
+async function verifyKeyAliasDialog() {
+  for (const [values, key] of [[null,null],[{name:'   '},null],[{name:'办公室'},null],[{name:'家用'}, {id:'existing',name:'旧名称',purpose:'保留已有用途'}]]) {
+    let resolveDialog, prompt, reloads=0; const calls=[];
+    const ctx=vm.createContext({
+      $:()=>({close(){}}),
+      promptDialog:(...args)=>{prompt=args;return new Promise(resolve=>{resolveDialog=resolve;});},
+      api:async (...args)=>{calls.push(args);},
+      openApiKeys:async ()=>{reloads++;},toast(){},key,
+    });
+    vm.runInContext('async '+declaration('editApiKeyAlias'),ctx);
+    const pending=vm.runInContext('editApiKeyAlias(key)',ctx);
+    assert.equal(calls.length,0,'确认前不能生成Key');
+    assert.equal(prompt[1][0].required,undefined,'别名可选');
+    assert.equal(prompt[2],key?'保存':'继续');
+    resolveDialog(values); await pending;
+    assert.equal(reloads,1);
+    if (!values) assert.equal(calls.length,0,'取消不能创建Key');
+    else {
+      assert.equal(calls.length,1);
+      assert.equal(calls[0][1].method,key?'PATCH':'POST');
+      assert.equal(calls[0][1].body.name,values.name.trim() || 'AI 只读访问');
+      if (key) assert.equal(calls[0][1].body.purpose,key.purpose);
+    }
+  }
+  console.log('PASS: 创建前弹窗、别名可选、继续后创建、取消不创建、现有别名编辑');
+}
+verifyKeyAliasDialog().catch(error=>{console.error(error);process.exitCode=1;});
 for (const name of ["layerId", "layerChildren", "flattenLayers", "measurementGaps", "overlapCenter", "layerAtPoint", "assetsForLayer", "escapeHtml", "valuePresent", "displayNumber", "displayPercent", "swatch", "colorValue", "fillCard", "promptStyle", "assetFilename", "icon", "textRow", "colorDetails", "fontWeightLabel", "alignmentLabel", "textOptionLabel", "renderTextSection"]) {
   vm.runInContext(declaration(name), context);
 }
@@ -65,6 +113,13 @@ console.log("PASS: UUID 与资源隔离、父子/同级/重叠/斜向/小数间�
 const connectSource = fs.readFileSync(path.join(__dirname, "static/connect.js"), "utf8");
 new vm.Script(connectSource);
 vm.runInContext(declaration("buildMcpConfig", connectSource), context);
+vm.runInContext(declaration("buildNpxMcpConfig", connectSource), context);
+context.URL = URL;
+const npmConfig = JSON.parse(evaluate('buildNpxMcpConfig("json", "npx", "http://192.168.1.100:8765", "/downloads/design-hub-mcp-1.0.2.tgz")')).mcpServers['design-hub'];
+assert.equal(npmConfig.args[1], '--package=http://192.168.1.100:8765/downloads/design-hub-mcp-1.0.2.tgz');
+assert.equal(npmConfig.args[3], '--base-url=http://192.168.1.100:8765');
+assert(npmConfig.env.DESIGN_HUB_API_KEY);
+assert.throws(() => evaluate('buildNpxMcpConfig("json", "npx", "http://user:secret@localhost", "/downloads/design-hub-mcp-1.0.2.tgz")'));
 context.configPath = '/Users/example/Design Files/a "quoted" file.py';
 const config = evaluate('buildMcpConfig("codex", "python3", configPath)');
 assert.ok(config.startsWith('[mcp_servers.design-hub]'));

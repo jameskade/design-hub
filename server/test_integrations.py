@@ -14,6 +14,7 @@ from http.cookiejar import CookieJar
 from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 import zipfile
+import tarfile
 
 
 def main():
@@ -28,6 +29,7 @@ def main():
         spec.loader.exec_module(app)
         source = root / "source"
         shutil.copytree(repo / "sketch-plugin", source / "sketch-plugin")
+        shutil.copytree(repo / "mcp-node", source / "mcp-node")
         shutil.copytree(repo / "server/static", source / "server/static")
         shutil.copyfile(repo / "design_hub_mcp.py", source / "design_hub_mcp.py")
         (source / "sketch-plugin/DesignHub.sketchplugin/.env").write_text("PRIVATE_FIXTURE_NOT_FOR_DOWNLOAD", encoding="utf-8")
@@ -157,6 +159,33 @@ def main():
             assert context["layout"]["layers"][0]["id"] == layer
             image = responses[4]["result"]["content"][0]
             assert image["mimeType"] == "image/png" and base64.b64decode(image["data"]) == base64.b64decode(png)
+            package_path = info['mcp']['npm_download_url']
+            package_bytes = anonymous.call(package_path)[0]
+            assert package_bytes == anonymous.call(package_path)[0]
+            with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as bundle:
+                assert set(bundle.getnames()) == {'package/package.json', 'package/cli.cjs'}
+                package = json.load(bundle.extractfile('package/package.json'))
+                assert package['version'] == manifest['version']
+                assert not package.get('dependencies') and not package.get('scripts')
+                assert bundle.getmember('package/cli.cjs').mode == 0o755
+            node_requests = json.loads(json.dumps(requests))
+            for entry in node_requests[2:]:
+                entry['params']['arguments'].pop('base_url')
+                entry['params']['arguments'].pop('api_key')
+            node_requests.append({'jsonrpc':'2.0','id':6,'method':'tools/call','params':{'name':'design_hub_list_projects','arguments':{'base_url':'http://127.0.0.1:9'}}})
+            npm_env = {**env, 'DESIGN_HUB_API_KEY':key, 'npm_config_cache':str(root / 'npm-cache'), 'npm_config_registry':'http://127.0.0.1:9', 'npm_config_audit':'false', 'npm_config_fund':'false', 'npm_config_update_notifier':'false', 'npm_config_ignore_scripts':'true'}
+            command = [shutil.which('npx'), '-y', '--package='+origin+package_path, 'design-hub-mcp', '--base-url='+origin]
+            launched = subprocess.run(command, input='\n'.join(map(json.dumps,node_requests))+'\n', capture_output=True, text=True, timeout=60, env=npm_env, cwd=root)
+            assert launched.returncode == 0, launched.stderr
+            node_results = [json.loads(line) for line in launched.stdout.splitlines()]
+            assert len(node_results) == 6
+            assert node_results[0]['result']['serverInfo']['version'] == manifest['version']
+            assert len(node_results[1]['result']['tools']) == 3
+            assert all(not r['result'].get('isError') for r in node_results[2:5])
+            assert node_results[4]['result']['content'][0]['mimeType'] == 'image/png'
+            assert node_results[5]['result']['isError']  # 环境变量 Key 不能发往另一服务器。
+            assert key not in launched.stdout and key not in launched.stderr
+            print('PASS: 空npm缓存、禁用公共registry，真实npx从HTTP安装包启动、三个工具与防Key跨站发送')
             print("PASS: 公共接入页面、版本真源、ZIP 白名单、脚本字节、下载边界、匿名/待审核权限、下载后的 MCP 三工具实际调用")
         finally:
             server.shutdown()

@@ -543,6 +543,11 @@ dialog h2 { color: var(--ink); font-size: 18px; letter-spacing: -.025em; }
 .management-table select { font-size: 12px; }
 .member-add { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
 .member-add input { flex: 1; min-width: 0; }
+.key-value { display: block; overflow-wrap: anywhere; white-space: pre-wrap; max-width: 360px; user-select: text; }
+.api-key-value { display: flex; max-width: 260px; white-space: nowrap; }
+.api-key-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.api-key-end { flex-shrink: 0; }
+.api-key-actions { white-space: nowrap; }
 .member-add select { min-width: 0; }
 .member-add .primary { white-space: nowrap; }
 .table-empty { padding: 36px !important; text-align: center !important; color: var(--muted); }

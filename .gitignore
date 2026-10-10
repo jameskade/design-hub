@@ -5,6 +5,7 @@ design-hub.pid
 __pycache__/
 .pytest_cache/
 node_modules/
+.venv/
 *.pyc
 *.log
 *.pid
