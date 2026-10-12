@@ -43,7 +43,7 @@ function reveal(element) { if (!reducedMotion.matches && element?.animate) eleme
 async function run(action) { try { return await action(); } catch (error) { toast(error.message || "操作未完成，请重试"); } }
 let loadingTicket = 0;
 function beginLoading(message) { const ticket = ++loadingTicket; $("#busy-message").textContent = message; $("#busy-status").classList.remove("hidden"); return () => { if (ticket === loadingTicket) $("#busy-status").classList.add("hidden"); }; }
-function closeInspector() { $("#viewer-view").classList.add("inspector-closed"); $(".inspector-panel").inert = true; state.selectedLayer = null; clearMeasurements(); $$(".layer-hotspot.active").forEach((el) => el.classList.remove("active")); }
+function closeInspector() { $("#viewer-view").classList.add("inspector-closed"); $(".inspector-panel").inert = true; state.selectedLayer = null; clearMeasurements(); $(".selection-outline")?.remove(); $$(".layer-hotspot.active").forEach((el) => el.classList.remove("active")); }
 function openGuide() { window.open("/connect/guide", "_blank", "noopener"); }
 
 async function api(path, options = {}) {
@@ -295,13 +295,29 @@ function metadataRoot() { return state.version?.metadata?.artboard || state.vers
 function layerChildren(layer) { return layer.layers || layer.children || []; }
 // 与服务端 ai_layout 使用同一身份来源，旧版 Sketch 导出将真实 UUID 放在 var。
 function layerId(layer) { return layer?.id || layer?.objectID || layer?.var || ""; }
+function hasVisibleText(layer) {
+  if (layer.hidden || layer.style?.opacity === 0) return false;
+  return layer.type === "Text" || layerChildren(layer).some(hasVisibleText);
+}
+// 与插件保持一致：导出格式不是文字标注的折叠边界。
+function isAtomicLayer(layer) { return layer.type === "Shape" || (Boolean(layer.exportFormats?.length) && !hasVisibleText(layer)); }
+function canSelectLayer(item) {
+  return Boolean(item) && !item.hidden && !item.layer.hidden && !item.layer.isMask && item.width > 0 && item.height > 0 && item.layer.style?.opacity !== 0;
+}
+function isSelectableLayer(item) {
+  const layer = item.layer; const style = layer.style || {};
+  if (!canSelectLayer(item)) return false;
+  if (isAtomicLayer(layer) || layer.type !== "Group") return true;
+  // 普通布局分组只维护层级和坐标；无自身绘制效果时不生成覆盖子内容的热点。
+  return ["fills", "borders", "shadows"].some((key) => (style[key] || []).some((effect) => effect.enabled !== false && (["Gradient", "Pattern"].includes(effect.fillType) || !/^#[0-9a-f]{6}00$/i.test(effect.color || ""))));
+}
 function flattenLayers(layers, parentX = 0, parentY = 0, output = [], depth = 0, path = "", parentKey = null, parentHidden = false) {
-  layers.forEach((layer, index) => { const frame = layer.frame || {}; const itemPath = `${path}.${index}`; const key = layerId(layer) || `layer-${itemPath}`; const item = { key, parentKey, layer, depth, path: itemPath, hidden: parentHidden || Boolean(layer.hidden), x: parentX + Number(frame.x || 0), y: parentY + Number(frame.y || 0), width: Number(frame.width || 0), height: Number(frame.height || 0) }; output.push(item); flattenLayers(layerChildren(layer), item.x, item.y, output, depth + 1, item.path, key, item.hidden); }); return output;
+  layers.forEach((layer, index) => { const frame = layer.frame || {}; const itemPath = `${path}.${index}`; const key = layerId(layer) || `layer-${itemPath}`; const item = { key, parentKey, layer, depth, path: itemPath, hidden: parentHidden || Boolean(layer.hidden) || layer.style?.opacity === 0, x: parentX + Number(frame.x || 0), y: parentY + Number(frame.y || 0), width: Number(frame.width || 0), height: Number(frame.height || 0) }; output.push(item); if (!isAtomicLayer(layer)) flattenLayers(layerChildren(layer), item.x, item.y, output, depth + 1, item.path, key, item.hidden); }); return output;
 }
 function layerAtPoint(items, x, y, selected = null) {
   let hit = null;
   for (const item of items) {
-    if (item.hidden || item.layer.hidden || item.layer.isMask || item.width <= 0 || item.height <= 0 || item.key === selected?.key) continue;
+    if (!isSelectableLayer(item) || item.key === selected?.key) continue;
     if (x < item.x || x > item.x + item.width || y < item.y || y > item.y + item.height) continue;
     // 同框背景不产生距离，继续检查真实子层或父容器，不能让装饰热点挡住测量。
     if (selected && !measurementGaps(selected, item).length) continue;
@@ -314,7 +330,7 @@ function renderLayerOverlay(width, height) {
   const overlay = $("#layer-overlay"); overlay.innerHTML = ""; overlay.style.width = `${width}px`; overlay.style.height = `${height}px`; clearMeasurements();
   const items = flattenLayers(layerChildren(metadataRoot())); state.layerRects = new Map(items.map((item) => [item.key, item]));
   // 保留有界 DOM 按钮供键盘访问；鼠标按完整几何命中，不再漏掉细线或第 350 层之后的图层。
-  items.filter((item) => !item.hidden && !item.layer.isMask && item.width > 0 && item.height > 0).slice(0, 350).forEach((item) => {
+  items.filter(isSelectableLayer).slice(0, 350).forEach((item) => {
     const key = item.key; const button = document.createElement("button"); button.className = "layer-hotspot"; button.dataset.layerKey = key;
     button.style.cssText = `left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;z-index:${2 + item.depth}`; button.title = item.layer.name || "图层"; button.setAttribute("aria-label", `查看 ${item.layer.name || "图层"} 的标注`);
     button.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); selectLayer(key); } });
@@ -336,7 +352,33 @@ function renderLayerOverlay(width, height) {
     closeInspector();
   };
 }
-function selectLayer(key) { const item = state.layerRects.get(key); if (!item) return; clearMeasurements(); state.selectedLayer = item; state.exportScopeKey = null; state.exportIncludeShadows = true; $$(".layer-hotspot").forEach((element) => element.classList.toggle("active", element.dataset.layerKey === key)); renderProperties(item); $("#viewer-view").classList.remove("inspector-closed"); $(".inspector-panel").inert = false; }
+function selectLayer(key, explicit = false) {
+  const item = state.layerRects.get(key);
+  if (!canSelectLayer(item) || (!explicit && !isSelectableLayer(item))) return;
+  clearMeasurements(); state.selectedLayer = item; state.exportScopeKey = null; state.exportIncludeShadows = true;
+  $$(".layer-hotspot").forEach((element) => element.classList.toggle("active", element.dataset.layerKey === key));
+  $(".selection-outline")?.remove();
+  // 主动选父层只增加可视边界，不把透明容器重新变成鼠标热点。
+  const outline = document.createElement("div"); outline.className = "selection-outline"; outline.setAttribute("aria-hidden", "true");
+  outline.style.cssText = `left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px`;
+  $("#layer-overlay").append(outline);
+  renderProperties(item); $("#viewer-view").classList.remove("inspector-closed"); $(".inspector-panel").inert = false;
+  if (explicit) {
+    const heading = $("#layer-hierarchy-title") || $(".export-section h3");
+    heading?.setAttribute("tabindex", "-1"); heading?.focus();
+  }
+}
+function layerAncestors(item) {
+  const ancestors = []; let parent = state.layerRects.get(item?.parentKey);
+  while (parent) { if (canSelectLayer(parent)) ancestors.unshift(parent); parent = state.layerRects.get(parent.parentKey); }
+  return ancestors;
+}
+function layerHierarchy(item) {
+  if (!item?.layer) return "";
+  const parents = layerAncestors(item);
+  if (!parents.length) return "";
+  return `<div class="export-layer-selection"><h4 id="layer-hierarchy-title" tabindex="-1">选择图层</h4><nav class="layer-hierarchy" aria-label="选择父图层">${parents.map((parent) => `<button type="button" class="secondary" data-select-parent="${escapeHtml(parent.key)}" title="选择父图层：${escapeHtml(parent.layer.name || parent.layer.type)}">${escapeHtml(parent.layer.name || parent.layer.type)}</button><span aria-hidden="true">›</span>`).join("")}<strong aria-current="true">${escapeHtml(item.layer.name || item.layer.type)}</strong></nav><p class="muted">点击父层名称选择整个分组，导出将跟随选区。</p></div>`;
+}
 function measurementGaps(a, b) {
   const gaps = [];
   // 两条轴独立比较：分离时量最近边；投影重叠时量两端边界差，覆盖父子、交叉和部分重叠。
@@ -425,9 +467,8 @@ function assetsForLayer(layer, kind = "slice") {
 }
 function exportScopes(item) {
   if (!item) return [];
-  const current = { key: `layer:${item.key}`, kind: "layer", item, members: [item], label: `当前图层 · ${item.layer.name || item.layer.type}` }; const parents = []; let parent = state.layerRects.get(item.parentKey);
-  while (parent) { if (!parent.layer.isMask && ["Group", "SymbolInstance", "SymbolMaster"].includes(parent.layer.type)) parents.push({ key: `parent:${parent.key}`, kind: "layer", item: parent, members: [parent], label: `完整控件 · ${parent.layer.name}` }); parent = state.layerRects.get(parent.parentKey); }
-  return [...parents, current];
+  // 导出严格跟随实际选区；缺少当前层资源时也不能用父容器替代。
+  return [{ key: `layer:${item.key}`, kind: "layer", item, members: [item], label: `当前图层 · ${item.layer.name || item.layer.type}` }];
 }
 function itemFrame(item) { return { x: item.x, y: item.y, width: item.width, height: item.height }; }
 function influenceBounds(item) {
@@ -436,7 +477,7 @@ function influenceBounds(item) {
 function mergeBounds(boxes) { const x = Math.min(...boxes.map((box) => box.x)); const y = Math.min(...boxes.map((box) => box.y)); const right = Math.max(...boxes.map((box) => box.x + box.width)); const bottom = Math.max(...boxes.map((box) => box.y + box.height)); return { x, y, width: right - x, height: bottom - y }; }
 function renderedBounds(item) { return mergeBounds([item, ...state.layerRects.values()].filter((candidate) => candidate === item || candidate.path.startsWith(`${item.path}.`)).map(influenceBounds)); }
 function scopeBounds(scope, includeShadows = true) { return mergeBounds(scope.members.map((item) => includeShadows ? renderedBounds(item) : itemFrame(item))); }
-function layerHasShadow(layer) { return (layer.style?.shadows || []).some((shadow) => shadow.enabled !== false) || layerChildren(layer).some(layerHasShadow); }
+function layerHasShadow(layer) { return layer.hasDescendantShadows || (layer.style?.shadows || []).some((shadow) => shadow.enabled !== false) || layerChildren(layer).some(layerHasShadow); }
 function scopeHasShadow(scope) { return scope.members.some((item) => layerHasShadow(item.layer)); }
 function exportAssetsForItem(item, includeShadows) { return !includeShadows && layerHasShadow(item.layer) ? assetsForLayer(item.layer, "slice-no-shadow") : assetsForLayer(item.layer); }
 function scopeSelector(scopes, scope) { return scopes.length > 1 ? `<label class="scope-label">导出范围<select id="export-scope">${scopes.map((candidate) => `<option value="${candidate.key}" ${candidate.key === scope.key ? "selected" : ""}>${escapeHtml(candidate.label)}</option>`).join("")}</select></label>` : ""; }
@@ -445,12 +486,15 @@ function exportPanel(layer) {
   const scopes = exportScopes(state.selectedLayer); if (!scopes.length) return ""; if (!state.exportScopeKey || !scopes.some((scope) => scope.key === state.exportScopeKey)) state.exportScopeKey = scopes[0].key; const scope = scopes.find((candidate) => candidate.key === state.exportScopeKey) || scopes[0]; const assets = assetsForLayer(scope.item.layer); const hasShadow = scopeHasShadow(scope); const includeShadows = !hasShadow || state.exportIncludeShadows; const exportAssets = exportAssetsForItem(scope.item, includeShadows); const pngs = exportAssets.filter((asset) => asset.format === "png"); const preview = [...pngs].sort((a, b) => b.scale - a.scale)[0] || exportAssets[0]; const missing = scope.members.filter((item) => !exportAssetsForItem(item, includeShadows).some((asset) => asset.format === "png"));
   if (scope.kind === "layer" && !assets.length) return `<section class="property-group export-section"><h3>导出</h3>${scopeSelector(scopes, scope)}<p class="export-empty">该范围还没有独立资源。请用更新后的 Sketch 插件重新同步。</p></section>`;
   const formats = scope.kind === "composite" || !includeShadows ? ["png", "jpg"] : ["png", "jpg", ...(assets.some((asset) => asset.format === "svg") ? ["svg"] : [])]; const bounds = scopeBounds(scope, includeShadows); const members = scope.kind === "composite" ? `<div class="composite-members"><strong>组合图层</strong>${scope.members.filter((item) => !item.layer.isMask).map((item) => `<span>${icon("image", 14)}${escapeHtml(item.layer.name || item.layer.type)}</span>`).join("")}</div>` : ""; const canvasPreview = scope.kind === "composite"; const previewHtml = canvasPreview ? '<div class="asset-preview"><canvas id="composite-preview"></canvas></div>' : (preview ? `<div class="asset-preview"><img src="${preview.download_url}" alt="切图预览"></div>` : ""); const shadowOption = hasShadow ? `<label class="export-shadow-option"><input id="export-shadow" type="checkbox" ${includeShadows ? "checked" : ""}><span>包含阴影</span><small>${includeShadows ? "按 Sketch 效果导出" : "使用无阴影原图"}</small></label>` : ""; const missingLabel = !includeShadows ? "无阴影资源" : "透明资源";
-  return `<section class="property-group export-section"><h3>导出</h3>${scopeSelector(scopes, scope)}${members}${previewHtml}${shadowOption}${missing.length ? `<p class="export-empty">缺少 ${missing.map((item) => escapeHtml(item.layer.name)).join("、")} 的${missingLabel}，请从 Sketch 重新同步一次。</p>` : ""}<div class="export-selects"><label>下载切图样式<select id="export-format">${formats.map((format) => `<option value="${format}">${format.toUpperCase()}</option>`).join("")}</select></label><label>切图使用平台<select id="export-platform"><option value="ios">iOS</option><option value="android">Android</option><option value="flutter">Flutter</option></select></label></div><div id="export-scales" class="export-scales" data-width="${bounds.width}" data-height="${bounds.height}"></div><button id="export-assets" class="export-button" ${missing.length ? "disabled" : ""}>导出资源</button></section>`;
+  return `<section class="property-group export-section"><h3>导出</h3>${scopes.length === 1 && scope.item !== state.selectedLayer ? `<p class="muted">${escapeHtml(scope.label)}（内部图层仅保留标注）</p>` : ""}${scopeSelector(scopes, scope)}${members}${previewHtml}${shadowOption}${missing.length ? `<p class="export-empty">缺少 ${missing.map((item) => escapeHtml(item.layer.name)).join("、")} 的${missingLabel}，请从 Sketch 重新同步一次。</p>` : ""}<div class="export-selects"><label>下载切图样式<select id="export-format">${formats.map((format) => `<option value="${format}">${format.toUpperCase()}</option>`).join("")}</select></label><label>切图使用平台<select id="export-platform"><option value="ios">iOS</option><option value="android">Android</option><option value="flutter">Flutter</option></select></label></div><div id="export-scales" class="export-scales" data-width="${bounds.width}" data-height="${bounds.height}"></div><button id="export-assets" class="export-button" ${missing.length ? "disabled" : ""}>导出资源</button></section>`;
 }
 function renderProperties(item, exportSettings = null) {
   const layer = item?.layer || item || {}; const target = $("#properties-panel"); const frame = item?.layer ? itemFrame(item) : (layer.frame || {}); const style = layer?.style || {}; const text = layer?.text || {};
   const fills = (style.fills || []).filter((item) => item.enabled !== false); const borders = (style.borders || []).filter((item) => item.enabled !== false); const shadows = (style.shadows || []).filter((item) => item.enabled !== false);
   target.innerHTML = `<section class="property-group"><h3 title="X / Y 为相对于画板的坐标">位置与尺寸</h3><div class="dimension-list"><div class="dimension-row">${inlineField("X", displayNumber(frame.x))}${inlineField("Y", displayNumber(frame.y))}</div><div class="dimension-row three">${inlineField("宽度", displayNumber(frame.width))}${inlineField("高度", displayNumber(frame.height))}${inlineField("旋转", displayNumber(layer?.rotation, "°"))}</div></div></section><section class="property-group"><h3>样式</h3>${text.content !== undefined ? renderTextSection(text, style.opacity ?? layer?.opacity ?? 1) : ""}<div class="style-inline-grid">${inlineField("不透明度", displayPercent(style.opacity ?? layer?.opacity ?? 1))}${inlineField("圆角", displayNumber(style.cornerRadius))}</div>${fills.map(fillCard).join("")}${borders.map(borderCard).join("")}${shadows.map(shadowCard).join("")}${style.blur?.enabled ? `<article class="style-card"><header><strong>模糊</strong><span>${escapeHtml(style.blur.type || "")}</span></header><div class="style-line"><span>半径</span><strong>${displayNumber(style.blur.radius)}</strong></div></article>` : ""}</section>${exportPanel(layer)}`;
+  // 缺资源时也能选择父层；入口只出现在导出区，不改变选区和导出的绑定。
+  target.querySelector(".export-section h3")?.insertAdjacentHTML("afterend", layerHierarchy(item));
+  target.querySelectorAll("[data-select-parent]").forEach((button) => button.addEventListener("click", () => selectLayer(button.dataset.selectParent, true)));
   target.ondblclick = (event) => { const value = event.target.closest(".copy-target, .style-line strong, .style-card code, .color-stop span"); if (value && !event.target.closest("button")) run(() => copyPropertyValue(value)); };
   bindExportControls(item, exportSettings);
 }

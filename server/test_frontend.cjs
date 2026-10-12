@@ -62,10 +62,51 @@ async function verifyKeyAliasDialog() {
   console.log('PASS: 创建前弹窗、别名可选、继续后创建、取消不创建、现有别名编辑');
 }
 verifyKeyAliasDialog().catch(error=>{console.error(error);process.exitCode=1;});
-for (const name of ["layerId", "layerChildren", "flattenLayers", "measurementGaps", "overlapCenter", "layerAtPoint", "assetsForLayer", "escapeHtml", "valuePresent", "displayNumber", "displayPercent", "swatch", "colorValue", "fillCard", "promptStyle", "assetFilename", "icon", "textRow", "colorDetails", "fontWeightLabel", "alignmentLabel", "textOptionLabel", "renderTextSection"]) {
+for (const name of ["layerId", "layerChildren", "hasVisibleText", "isAtomicLayer", "canSelectLayer", "isSelectableLayer", "flattenLayers", "measurementGaps", "overlapCenter", "layerAtPoint", "assetsForLayer", "escapeHtml", "valuePresent", "displayNumber", "displayPercent", "swatch", "colorValue", "fillCard", "promptStyle", "assetFilename", "icon", "textRow", "colorDetails", "fontWeightLabel", "alignmentLabel", "textOptionLabel", "renderTextSection"]) {
   vm.runInContext(declaration(name), context);
 }
 const evaluate = (expression) => vm.runInContext(expression, context);
+{
+  const parent = {key:'button',layer:{name:'按钮<分组>',type:'Group'},width:44,height:44,x:0,y:0};
+  const child = {key:'plus',parentKey:'button',layer:{name:'加号',type:'Shape'},width:20,height:20,x:12,y:12};
+  const ui = {classList:{remove(){},toggle(){}},append(){},focus(){},remove(){},setAttribute(){}};
+  const ctx = vm.createContext({state:{layerRects:new Map([['button',parent],['plus',child]])},
+    $:()=>ui,$$:()=>[],clearMeasurements(){},renderProperties(){},
+    document:{createElement:()=>({style:{},setAttribute(){}})},child});
+  for (const name of ['hasVisibleText','layerChildren','isAtomicLayer','canSelectLayer','isSelectableLayer','selectLayer','layerAncestors','layerHierarchy','escapeHtml','exportScopes']) vm.runInContext(declaration(name),ctx);
+  vm.runInContext('selectLayer("plus"); selectLayer("button")',ctx);
+  assert.equal(ctx.state.selectedLayer.key,'plus','透明父层不参与普通点击');
+  assert.equal(vm.runInContext('layerAncestors(child)[0].key',ctx),'button');
+  assert(vm.runInContext('layerHierarchy(child)',ctx).includes('按钮&lt;分组&gt;'));
+  assert(vm.runInContext('layerHierarchy(child)',ctx).includes('选择图层'));
+  assert.equal(vm.runInContext('layerHierarchy(state.layerRects.get("button"))',ctx),'','无可选父层时隐藏层级入口');
+  vm.runInContext('selectLayer("button",true)',ctx);
+  assert.equal(ctx.state.selectedLayer.key,'button','显式父层选择允许透明布局容器');
+  assert.equal(vm.runInContext('exportScopes(state.selectedLayer)[0].item.key',ctx),'button','选区和导出必须同时切换');
+  parent.hidden=true; vm.runInContext('selectLayer("plus"); selectLayer("button",true)',ctx);
+  assert.equal(ctx.state.selectedLayer.key,'plus','显式选择仍不能绕过隐藏过滤');
+}
+{
+  vm.runInContext(declaration('exportScopes'), context);
+  const outer = {key:'outer',layer:{name:'整体切图',type:'Group',exportFormats:[{fileFormat:'png'}]}};
+  const inner = {key:'inner',parentKey:'outer',layer:{name:'内层切图',type:'Group',exportFormats:[{fileFormat:'png'}]}};
+  const label = {key:'label',parentKey:'inner',layer:{name:'文字',type:'Text'}};
+  context.state.layerRects = new Map([['outer',outer],['inner',inner],['label',label]]);
+  context.scopeItem = label;
+  assert.equal(evaluate('exportScopes(scopeItem).length'),1);
+  assert.equal(evaluate('exportScopes(scopeItem)[0].item.key'),'label','选中子层不能自动导出父层');
+  context.scopeItem = outer;
+  assert.equal(evaluate('exportScopes(scopeItem)[0].item.key'),'outer');
+  outer.layer.exportFormats = []; inner.layer.exportFormats = [];
+  context.scopeItem = label;
+  assert.equal(evaluate('exportScopes(scopeItem).length'),1,'导出面板不能另行切换选区');
+  assert.equal(evaluate('exportScopes(scopeItem)[0].members[0].key'),'label');
+  context.state.version.assets = [{layer_id:'outer',kind:'slice',format:'png'}];
+  label.layer.id = 'label'; outer.layer.id = 'outer';
+  assert.equal(evaluate('assetsForLayer(exportScopes(scopeItem)[0].item.layer).length'),0,'子层缺少资源时不能回退父资源');
+  context.scopeItem = outer;
+  assert.equal(evaluate('assetsForLayer(exportScopes(scopeItem)[0].item.layer).length'),1,'明确选中父层才导出父资源');
+}
 const assertGeometry = (expression, expected) => assert.equal(JSON.stringify(evaluate(expression)), JSON.stringify(expected));
 const first = "AF235EED-38E9-46BE-9776-F135B2E3C456";
 const second = "DCE524C4-8000-4CC2-BA39-31D85C0AB266";
@@ -99,6 +140,31 @@ assert.equal(evaluate('layerAtPoint(hitLayers,12,12).key'), "same-frame", "同�
 assert.equal(evaluate('layerAtPoint(hitLayers,12,12,hitLayers[1]).key'), "parent", "同框装饰层不应挡住父层间距");
 assert.equal(evaluate('layerAtPoint(hitLayers,60.5,40).key'), "line", "1pt 细线也能命中");
 assert.equal(evaluate('flattenLayers([{id:"p",hidden:true,layers:[{id:"c"}]}])[1].hidden'), true, "隐藏父容器的子层不能参与鼠标命中");
+context.boundaryLayers = [
+  {id:'background-group',type:'Group',frame:{x:32,y:102,width:322,height:177},layers:[{id:'star',type:'Image',frame:{x:49,y:60,width:20,height:20}}]},
+  {id:'icon',type:'Group',exportFormats:[{fileFormat:'png'}],frame:{x:26,y:215,width:24,height:24},layers:[{id:'path',type:'ShapePath',frame:{x:3,y:4,width:6,height:5}}]},
+  {id:'boolean',type:'Shape',frame:{x:100,y:215,width:24,height:24},layers:[{id:'internal',type:'ShapePath',frame:{x:0,y:0,width:2,height:3}}]},
+  {id:'empty',type:'Group',frame:{x:200,y:100,width:50,height:50}},
+  {id:'white',type:'Group',style:{fills:[{enabled:true,color:'#ffffffff'}]},frame:{x:260,y:100,width:50,height:50}}
+];
+assert.equal(evaluate('flattenLayers(boundaryLayers).map(item=>item.key).join()'),'background-group,star,icon,boolean,empty,white');
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),40,120)'),null,'透明容器不抢占空白位置');
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),82,163).key'),'star','容器内真实图片仍可选');
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),30,220).key'),'icon','路径位置只选中整体图标');
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),101,216).key'),'boolean');
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),210,110)'),null);
+assert.equal(evaluate('layerAtPoint(flattenLayers(boundaryLayers),270,110).key'),'white','真实白色填充不可误删');
+assert.equal(evaluate('flattenLayers(boundaryLayers).filter(isSelectableLayer).map(item=>item.key).join()'),'star,icon,boolean,white','键盘热点与鼠标使用同一规则');
+context.textCard = {id:'card',type:'Group',exportFormats:[{fileFormat:'png'}],frame:{x:50,y:90,width:258,height:177},layers:[
+  {id:'copy',type:'Text',frame:{x:0,y:68,width:258,height:44}},
+  {id:'button',type:'Group',exportFormats:[{fileFormat:'png'}],frame:{x:0,y:120,width:258,height:50},layers:[{id:'log',type:'Text',frame:{x:100,y:10,width:38,height:27}}]},
+  {id:'nested-icon',type:'Group',exportFormats:[{fileFormat:'png'}],frame:{x:110,y:0,width:24,height:24},layers:[{id:'icon-path',type:'ShapePath',frame:{x:0,y:0,width:5,height:5}}]}
+]};
+assert.equal(evaluate('layerAtPoint(flattenLayers([textCard]),60,165).key'),'copy','卡片设置切图仍能选说明文字');
+assert.equal(evaluate('layerAtPoint(flattenLayers([textCard]),155,225).key'),'log','嵌套按钮文字仍可选择');
+assert.equal(evaluate('layerAtPoint(flattenLayers([textCard]),162,92).key'),'nested-icon','卡片内图标路径仍只选整体');
+assert.equal(evaluate('flattenLayers([textCard]).some(item=>item.key === "icon-path")'),false);
+assert.equal(evaluate('isAtomicLayer({type:"Group",exportFormats:[{}],layers:[{type:"Text",hidden:true}]})'),true);
 assert.equal(evaluate('layerAtPoint([...Array.from({length:400},(_,i)=>({key:String(i),x:i,y:0,width:1,height:1,depth:0,layer:{}}))],399.5,.5).key'), "399", "命中不受 DOM 按钮数量限制");
 assert.equal(evaluate('fillCard({fillType:"Color",color:"#000000",gradient:{type:"Linear",stops:[]}},0).includes("渐变类型")'), false);
 assert.equal(evaluate('fillCard({fillType:"Gradient",gradient:{type:"Linear",stops:[]}},0).includes("渐变类型")'), true);

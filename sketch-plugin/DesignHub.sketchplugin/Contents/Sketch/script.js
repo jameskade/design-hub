@@ -157,13 +157,26 @@ function withToken(callback) {
   login(callback);
 }
 
-function findArtboard(layer) {
+function isLayerVisible(layer) {
+  // 子层自身可见并不代表实际可见，隐藏父层必须阻断整条分支。
   let current = layer;
   while (current) {
-    if (current.type === "Artboard") return current;
+    if (current.hidden) return false;
     current = current.parent;
   }
-  return null;
+  return Boolean(layer);
+}
+
+function findArtboard(layer) {
+  if (!isLayerVisible(layer)) return null;
+  let current = layer;
+  let artboard = null;
+  while (current) {
+    // 嵌套画框属于外层界面，不能因选中内部内容而创建独立界面。
+    if (current.type === "Artboard") artboard = current;
+    current = current.parent;
+  }
+  return artboard;
 }
 
 function selectedArtboards() {
@@ -279,7 +292,28 @@ function styleMetadata(layer) {
   };
 }
 
-function layerMetadata(layer) {
+function hasVisibleText(layer) {
+  if (layer.hidden || (layer.style && layer.style.opacity === 0)) return false;
+  return layer.type === "Text" || (layer.layers || []).some(hasVisibleText);
+}
+
+function isAtomicLayer(layer) {
+  // 可整体导出的卡片仍需保留文字标注，不能仅凭导出格式折叠布局。
+  return layer.type === "Shape" || ((layer.exportFormats || []).length > 0 && !hasVisibleText(layer));
+}
+
+function hasVisibleContent(layer) {
+  if (!isLayerVisible(layer)) return false;
+  if (layer.type !== "Group") return true;
+  const style = layer.style || {};
+  return ["fills", "borders", "shadows"].some((key) => (style[key] || []).some((effect) => effect.enabled !== false))
+    || (layer.layers || []).some(hasVisibleContent);
+}
+
+function layerMetadata(layer, isRoot = false) {
+  if (!isLayerVisible(layer)) return null;
+  if (!isRoot && !hasVisibleContent(layer) && !isMaskLayer(layer)) return null;
+  const atomic = !isRoot && isAtomicLayer(layer);
   const result = {
     id: layerIdentifier(layer),
     name: String(layer.name || "未命名"),
@@ -306,7 +340,9 @@ function layerMetadata(layer) {
       prefix: String(format.prefix || ""),
       suffix: String(format.suffix || ""),
     })),
-    layers: (layer.layers || []).map(layerMetadata),
+    // 整体切图和布尔形状是交付边界，内部路径不能继续变成独立标注。
+    layers: atomic ? [] : (layer.layers || []).map((child) => layerMetadata(child)).filter(Boolean),
+    hasDescendantShadows: atomic && enabledShadows(layer).length > 0,
   };
   if (layer.type === "Text") {
     const font = textFontMetadata(layer);
@@ -352,6 +388,7 @@ function base64File(path) {
 }
 
 function exportLayerFiles(layer, directory, kind = "slice", includeSvg = true) {
+  if (!isLayerVisible(layer)) throw new Error(`图层“${layer.name}”已隐藏，已停止当前画板上传`);
   const exported = [];
   const identifier = layerIdentifier(layer);
   try {
@@ -382,6 +419,7 @@ function exportLayerFiles(layer, directory, kind = "slice", includeSvg = true) {
 }
 
 function enabledShadows(layer, output = []) {
+  if (!isLayerVisible(layer)) return output;
   (layer.style && layer.style.shadows || []).filter((shadow) => shadow.enabled !== false).forEach((shadow) => output.push(shadow));
   (layer.layers || []).forEach((child) => enabledShadows(child, output));
   return output;
@@ -400,14 +438,18 @@ function exportShadowlessLayerFiles(layer, directory) {
   }
 }
 
-function collectAssetLayers(layer, output = []) {
+function collectAssetLayers(layer, output = [], isRoot = true) {
+  if (!hasVisibleContent(layer)) return output;
   const style = layer.style || {};
+  const explicitExport = (layer.exportFormats || []).length > 0;
   const hasPattern = (style.fills || []).some((fill) => String(fill.fillType || "") === "Pattern");
   const autoExport = ["Bitmap", "Image", "SymbolInstance", "Shape", "ShapePath", "Text", "Group"].includes(String(layer.type || ""));
-  if ((layer.exportFormats || []).length || hasPattern || autoExport) {
+  if (explicitExport || hasPattern || autoExport) {
     output.push(layer);
   }
-  (layer.layers || []).forEach((child) => collectAssetLayers(child, output));
+  // 标注和资源使用同一边界，防止布尔形状内部路径被拆成独立资源。
+  if (!isRoot && isAtomicLayer(layer)) return output;
+  (layer.layers || []).forEach((child) => collectAssetLayers(child, output, false));
   return output;
 }
 
@@ -419,6 +461,7 @@ function exportPreview(artboard, directory) {
 }
 
 function buildPayload(artboard, folderId) {
+  if (!isLayerVisible(artboard)) throw new Error("画板已隐藏，已停止上传");
   const directory = createTempDirectory();
   try {
     const artboardDirectory = directory + "/" + layerIdentifier(artboard);
@@ -430,7 +473,7 @@ function buildPayload(artboard, folderId) {
       height: number(artboard.frame.height),
       canvas_x: number(artboard.frame.x),
       canvas_y: number(artboard.frame.y),
-      metadata: { artboard: layerMetadata(artboard) },
+      metadata: { artboard: layerMetadata(artboard, true) },
       preview_base64: exportPreview(artboard, artboardDirectory),
     }] };
   } finally {
@@ -564,7 +607,7 @@ function uploadSelectedArtboards() {
   const artboards = selectedArtboards();
   console.log(`[DesignHub]:[Upload] 选中画板数量=${artboards.length}`);
   if (!artboards.length) {
-    UI.alert("没有选择画板", "请先在 Sketch 画布中选择一个或多个 Artboard，再运行上传。");
+    UI.alert("没有选择可见画板", "请先在 Sketch 画布中选择一个或多个可见 Artboard；隐藏图层及隐藏父层中的内容不会上传。");
     return;
   }
   chooseUploadServer(() => withToken((token, user) => {

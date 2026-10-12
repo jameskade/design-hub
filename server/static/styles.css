@@ -129,6 +129,11 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 .canvas-stage { position: relative; width: max-content; transform-origin: top left; box-shadow: 0 16px 45px rgba(28, 33, 44, .18); background: white; }
 .canvas-stage img { display: block; max-width: none; }
 .layer-overlay { position: absolute; inset: 0; }
+.selection-outline { position: absolute; border: 1px solid var(--accent); pointer-events: none; z-index: 1000; }
+.layer-hierarchy { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.layer-hierarchy button { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.export-layer-selection { margin-bottom: 12px; }
+.export-layer-selection h4 { margin: 0 0 8px; font-size: 12px; }
 .layer-hotspot { position: absolute; border: 1px solid transparent; background: transparent; padding: 0; }
 .layer-hotspot:hover, .layer-hotspot.active { border-color: var(--accent); background: rgba(51, 92, 255, .08); }
 .inspector-heading { position: sticky; top: 0; height: 46px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--line); background: white; font-size: 13px; font-weight: 700; z-index: 2; }

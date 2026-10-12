@@ -73,3 +73,60 @@ for (const saved of ['', 'http://saved-server:8765']) {
 }
 console.log('PASS: 下载内置地址、手动地址优先、非法服务地址拒绝');
 console.log('PASS: 目标ID跨定时器保持、目录快照、无效目标一次拦截且无请求');
+
+// 纯对象回归，不启动 Sketch、不访问网络或修改设计稿。
+{
+  let selected = [];
+  const ctx = vm.createContext({require(name) {
+    return name === 'sketch' ? {getSelectedDocument: () => ({selectedLayers: {layers: selected}})} : {};
+  }});
+  vm.runInContext(source, ctx);
+  const page = {type:'Page'};
+  const board = {id:'board',type:'Artboard',parent:page,layers:[],exportFormats:[{fileFormat:'png'}]};
+  function child(parent, id, type, extras = {}) {
+    const layer = {id,name:id,type,parent,layers:[],...extras};
+    parent.layers.push(layer); return layer;
+  }
+  const slice = child(board,'slice','Group',{exportFormats:[{fileFormat:'png'}]});
+  const inner = child(slice,'inner','Group',{exportFormats:[{fileFormat:'png'}]});
+  const text = child(inner,'label','ShapePath');
+  const hidden = child(board,'hidden','Group',{hidden:true});
+  const hiddenChild = child(hidden,'hidden-child','Shape');
+  const ordinary = child(board,'ordinary','Group');
+  const shape = child(ordinary,'shape','Shape');
+  child(shape,'boolean-path','ShapePath');
+  const empty = child(board,'empty','Group');
+  const hiddenOnly = child(board,'hidden-only','Group');
+  child(hiddenOnly,'hidden-content','Image',{hidden:true});
+  const nested = child(board,'nested','Artboard');
+  const nestedChild = child(nested,'nested-child','Shape');
+  Object.assign(ctx,{board,slice,text,hiddenChild,nestedChild,shape,empty,hiddenOnly});
+  const evaluate = code => vm.runInContext(code,ctx);
+  assert.equal(evaluate('collectAssetLayers(board).map(layer=>layer.id).join()'),'board,slice,ordinary,shape,nested-child');
+  assert.equal(evaluate('layerMetadata(board,true).layers.some(layer=>layer.id === "hidden")'),false);
+  assert.equal(evaluate('layerMetadata(board,true).layers.length'),3,'保留界面内容，排除空和隐藏分支');
+  assert.equal(evaluate('layerMetadata(slice).layers.length'),0,'整体切图内部不再保留独立标注');
+  assert.equal(evaluate('layerMetadata(shape).layers.length'),0,'布尔形状内部路径不作为独立标注');
+  assert.equal(evaluate('layerMetadata(empty)'),null);
+  assert.equal(evaluate('layerMetadata(hiddenOnly)'),null);
+  text.style = {shadows:[{enabled:true}]};
+  assert.equal(evaluate('layerMetadata(slice).hasDescendantShadows'),true,'收拢标注不丢失无阴影资源能力');
+  text.type = 'Text';
+  assert.equal(evaluate('layerMetadata(slice).layers[0].layers[0].id'),'label','含嵌套文字的切图容器必须保留文字标注');
+  assert.equal(evaluate('collectAssetLayers(board).map(layer=>layer.id).join()'),'board,slice,inner,label,ordinary,shape,nested-child','卡片整体资源与文字资源同时保留');
+  text.hidden = true;
+  assert.equal(evaluate('isAtomicLayer(slice)'),true,'隐藏文字不改变图标边界');
+  text.hidden = false;
+  assert.equal(evaluate('layerMetadata(hiddenChild)'),null);
+  assert.equal(evaluate('collectAssetLayers(hiddenChild).length'),0);
+  assert.equal(evaluate('findArtboard(nestedChild)'),board);
+  assert.equal(evaluate('findArtboard(hiddenChild)'),null);
+  selected = [board,nestedChild,text,hiddenChild];
+  assert.equal(evaluate('selectedArtboards().map(layer=>layer.id).join()'),'board');
+  board.hidden = true;
+  assert.equal(evaluate('selectedArtboards().length'),0);
+  assert.throws(()=>evaluate('buildPayload(board,"folder")'),/隐藏/);
+  assert.throws(()=>evaluate('exportLayerFiles(text,"unused")'),/隐藏/);
+  assert.equal(evaluate('enabledShadows(board).length'),0);
+}
+console.log('PASS: 隐藏过滤、整体标注及切图边界、空分组排除、阴影保留、嵌套画框归属和画板去重');
