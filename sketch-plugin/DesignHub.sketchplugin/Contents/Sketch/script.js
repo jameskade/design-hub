@@ -1,20 +1,12 @@
 const sketch = require("sketch");
 const UI = require("sketch/ui");
 const Settings = require("sketch/settings");
-const timers = require("timers");
 
 const SERVER_KEY = "designHub.serverURL";
 const TOKEN_KEY = "designHub.sessionToken";
 const USER_KEY = "designHub.username";
 // 下载打包时由对应部署注入地址；直接安装源码时必须手动填写。
 const BUNDLED_SERVER_URL = "";
-const UPLOAD_CONCURRENCY = 1;
-
-function schedule(callback) {
-  // 使用 Sketch 公开的 timers 模块，由其 fiber 保持脚本存活并让出事件循环。
-  return timers.setTimeout(callback, 20);
-}
-
 function normalizeServerURL(value) {
   let url = String(value || "").trim();
   while (url.endsWith("/")) url = url.slice(0, -1);
@@ -202,13 +194,15 @@ function choose(title, items, callback) {
   });
 }
 
-function confirmUpload(artboards, projectName, folderName) {
+function confirmProcessingMode(artboards, projectName, folderName, origin) {
   const alert = NSAlert.alloc().init();
   alert.setMessageText(`上传 ${artboards.length} 个画板`);
-  alert.setInformativeText(`${serverURL()}\n${projectName} / ${folderName}\n\n${artboards.map((board) => `• ${board.name}`).join("\n")}`);
-  alert.addButtonWithTitle("开始上传");
-  alert.addButtonWithTitle("取消");
-  return alert.runModal() === NSAlertFirstButtonReturn;
+  alert.setInformativeText(`${origin}\n${projectName} / ${folderName}\n\n请选择处理方式。服务器处理上传快照；本地处理导出资源后后台并行上传。`);
+  const mode = NSPopUpButton.alloc().initWithFrame_pullsDown(NSMakeRect(0,0,340,30),false);
+  mode.addItemsWithTitles(["服务器处理（推荐）", "本地处理（后台并行上传）"]);
+  alert.setAccessoryView(mode);alert.addButtonWithTitle("开始上传");alert.addButtonWithTitle("取消");
+  if(alert.runModal()!==NSAlertFirstButtonReturn)return null;
+  return Number(mode.indexOfSelectedItem())===0 ? "server" : "local";
 }
 
 function number(value) {
@@ -481,120 +475,37 @@ function buildPayload(artboard, folderId) {
   }
 }
 
-function uploadProgress(total) {
-  const window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer(NSMakeRect(0, 0, 440, 132), NSTitledWindowMask, NSBackingStoreBuffered, false);
-  // Mocha 管理原生对象的生命周期；close 不得再额外释放窗口。
-  window.setReleasedWhenClosed(false);
-  window.setTitle("正在上传到 Design Hub");
-  const current = NSTextField.alloc().initWithFrame(NSMakeRect(20, 82, 400, 24));
-  current.setEditable(false); current.setBezeled(false); current.setDrawsBackground(false); current.setFont(NSFont.boldSystemFontOfSize(13));
-  const indicator = NSProgressIndicator.alloc().initWithFrame(NSMakeRect(20, 56, 400, 14));
-  indicator.setIndeterminate(false); indicator.setMinValue(0); indicator.setMaxValue(100); indicator.setDoubleValue(0);
-  const summary = NSTextField.alloc().initWithFrame(NSMakeRect(20, 22, 400, 22));
-  summary.setEditable(false); summary.setBezeled(false); summary.setDrawsBackground(false); summary.setTextColor(NSColor.secondaryLabelColor());
-  window.contentView().addSubview(current); window.contentView().addSubview(indicator); window.contentView().addSubview(summary); window.center(); window.makeKeyAndOrderFront(null);
-  const refresh = () => {
-    // 每个画板由官方定时器分帧执行；这里只刷新控件，不手动嵌套 RunLoop。
-    window.displayIfNeeded();
-  };
-  return {
-    update(completed, phase, artboard, counts, active) {
-      const progress = Math.round((completed / total) * 100);
-      current.setStringValue(`${phase} · ${artboard.name}`);
-      indicator.setDoubleValue(progress);
-      summary.setStringValue(`完成 ${completed}/${total} · 上传中 ${active}/${Math.min(UPLOAD_CONCURRENCY, total)} · 新增 ${counts.created || 0} · 更新 ${counts.updated || 0} · 未变化 ${counts.unchanged || 0} · 失败 ${counts.failed || 0}`);
-      UI.message(`上传进度 ${progress}% · 完成 ${completed}/${total} · ${artboard.name}`); refresh();
-    },
-    finish(counts) {
-      indicator.setDoubleValue(100); current.setStringValue(`已处理 ${total}/${total} 个画板`); summary.setStringValue(`新增 ${counts.created || 0} · 更新 ${counts.updated || 0} · 未变化 ${counts.unchanged || 0} · 失败 ${counts.failed || 0}`); refresh();
-    },
-    close() { window.orderOut(null); window.close(); },
-  };
-}
-
-function uploadToFolder(token, project, folder, artboards) {
-  // 在同步选项回调内固定基础值，后续 fiber 不再读取弹窗回调持有的目标对象。
-  const projectId = String(project && project.id || "");
-  const folderId = String(folder && folder.id || "");
-  const sessionToken = String(token || "");
-  const base = `/api/projects/${projectId}/uploads`;
-  if (!/^[0-9a-f-]{36}$/i.test(projectId) || !/^[0-9a-f-]{36}$/i.test(folderId) || !sessionToken) {
-    UI.alert("无法开始上传", "项目、目录或登录状态无效，请重新选择后上传。");
+function uploadWithProcessingMode(token, project, folder, artboards) {
+  const origin=normalizeServerURL(serverURL());
+  const projectId=String(project.id || ""),folderId=String(folder.id || ""),sessionToken=String(token || "");
+  if(!/^[0-9a-f-]{36}$/i.test(projectId)||!/^[0-9a-f-]{36}$/i.test(folderId)||!sessionToken){UI.alert("无法上传","项目、目录或登录状态无效");return;}
+  const mode=confirmProcessingMode(artboards,project.name,folder.name,origin);
+  if(!mode)return;
+  const capabilities=request("GET","/api/me",null,sessionToken,origin);
+  const options={token:sessionToken,origin,projectId,folderId,artboards};
+  if(mode==="local") {
+    if(capabilities.parallel_upload_enabled!==true){UI.alert("服务器需要更新","当前服务不支持并行批次，请先更新服务后再使用本地处理。");return;}
+    require("./local-upload")({...options,buildPayload,collectLayers:collectAssetLayers,exportLayer:(layer,directory)=>exportLayerFiles(layer,directory).concat(exportShadowlessLayerFiles(layer,directory))});
     return;
   }
-  // 在途批次固定目标地址，即使另一次操作修改设置，也不能把令牌发到另一服务器。
-  const uploadOrigin = normalizeServerURL(serverURL());
-  if (!confirmUpload(artboards, project.name, folder.name)) return;
-  const counts = { created: 0, updated: 0, unchanged: 0, failed: 0 }; const failures = []; const progress = uploadProgress(artboards.length);
-  const fail = (artboard, error) => { counts.failed += 1; failures.push(`${artboard.name}：${error.message}`); console.log(`[DesignHub]:[Upload] 失败 artboard=${artboard.name} error=${error.message}`); };
-  let index = 0;
-  const uploadNext = () => {
-    const artboard = artboards[index];
-    progress.update(index, "正在导出", artboard, counts, 0);
-    let uploadId = null; let layerIndex = 0; let chunks = 0; let assets = 0; let layers = [];
-    const advance = () => {
-      index += 1; progress.update(index, "已完成", artboard, counts, 0);
-      if (index < artboards.length) { schedule(uploadNext); return; }
-      progress.finish(counts); progress.close(); UI.message("上传进度 100% · 完成");
-      const failureText = failures.length ? `\n\n失败画板：\n${failures.slice(0, 8).join("\n")}${failures.length > 8 ? `\n另有 ${failures.length - 8} 个失败` : ""}` : "";
-      UI.alert(failures.length ? "上传完成（部分失败）" : "上传完成", `分批上传 · 新增 ${counts.created} · 更新 ${counts.updated} · 未变化 ${counts.unchanged} · 失败 ${counts.failed}${failureText}`);
-    };
-    const abort = (error) => {
-      fail(artboard, error);
-      if (uploadId) { try { request("POST", `${base}/${uploadId}/cancel`, {}, sessionToken, uploadOrigin); } catch (_) { /* 断网暂存由服务端过期清理。 */ } }
-      advance();
-    };
-    const uploadLayer = () => {
-      try {
-        if (layerIndex < layers.length) {
-          const directory = createTempDirectory();
-          try {
-            const layer = layers[layerIndex];
-            const batch = exportLayerFiles(layer, directory).concat(exportShadowlessLayerFiles(layer, directory));
-            if (!batch.length) throw new Error(`图层“${layer.name}”未导出任何资源`);
-            // 单个资源一批，避免父分组的多倍率 PNG 同时进入一个请求。
-            for (const asset of batch) {
-              const ack = request("POST", `${base}/${uploadId}/chunk`, { index: chunks, assets: [asset] }, sessionToken, uploadOrigin);
-              if (ack.index !== chunks || ack.received !== 1) throw new Error("服务端未确认资源批次");
-              chunks += 1; assets += 1;
-            }
-          } finally { NSFileManager.defaultManager().removeItemAtPath_error(directory, null); }
-          layerIndex += 1;
-          progress.update(index, `资源 ${assets} 个已上传 · 图层 ${layerIndex}/${layers.length}`, artboard, counts, 1);
-          schedule(uploadLayer); return;
-        }
-        const result = request("POST", `${base}/${uploadId}/commit`, { chunks, assets }, sessionToken, uploadOrigin);
-        const item = result.results && result.results[0];
-        if (!item || result.results.length !== 1 || item.sketch_id !== layerIdentifier(artboard) || !["created", "updated", "unchanged"].includes(item.status)) {
-          throw new Error("服务端未确认当前画板上传结果，请检查网页后重试");
-        }
-        counts[item.status] += 1;
-        advance();
-      } catch (error) { abort(error); }
-    };
-    try {
-      const payload = buildPayload(artboard, folderId);
-      layers = collectAssetLayers(artboard);
-      const started = request("POST", base, { folder_id: folderId, board: payload.artboards[0] }, sessionToken, uploadOrigin);
-      uploadId = started.upload_id;
-      if (!/^[0-9a-f-]{36}$/.test(uploadId || "")) throw new Error("服务端没有返回有效上传任务，请升级服务端");
-      schedule(uploadLayer);
-    } catch (error) { abort(error); }
-  };
-  schedule(uploadNext);
+  if(capabilities.snapshot_upload_enabled!==true){UI.alert("服务器处理未启用","当前服务器未启用快照渲染，请启用后重试，或重新选择本地处理。");return;}
+  require("./snapshot")( {...options,
+    metadata: layerMetadata,
+    resources: (board) => collectAssetLayers(board).map((layer) => ({layer_id: layerIdentifier(layer), name: String(layer.name), width: number(layer.frame.width), height: number(layer.frame.height), has_shadow: enabledShadows(layer).length > 0})),
+    confirm: () => true} );
 }
 
-function chooseOrCreateFolder(token, project, folders, artboards) {
+function chooseOrCreateFolder(token, project, folders, artboards, uploader = uploadWithProcessingMode) {
   const items = [{ label: "＋ 新建目录…", value: { create: true } }].concat(folders.map((folder) => ({ label: folder.name, value: folder })));
   choose("选择目标目录", items, (folder) => {
-    if (!folder.create) return uploadToFolder(token, project, folder, artboards);
+    if (!folder.create) return uploader(token, project, folder, artboards);
     UI.getInputFromUser("新建目录", { initialValue: "" }, (error, name) => {
       if (error) return;
       const folderName = String(name || "").trim();
       if (!folderName) { UI.alert("无法新建目录", "目录名称不能为空"); return; }
       try {
         const created = request("POST", `/api/projects/${project.id}/folders`, { name: folderName }, token);
-        uploadToFolder(token, project, { id: created.id, name: folderName }, artboards);
+        uploader(token, project, { id: created.id, name: folderName }, artboards);
       } catch (createError) {
         UI.alert("新建目录失败", createError.message);
       }

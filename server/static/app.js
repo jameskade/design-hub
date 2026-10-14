@@ -69,7 +69,7 @@ async function initialize() {
   if (connectSectionFromPath()) return initializeConnect();
   try {
     const result = await api("/api/me");
-    state.user = result.user; state.csrf = result.csrf_token; sessionStorage.setItem("designHubCsrf", state.csrf);
+    state.user = result.user; state.snapshotEnabled = result.snapshot_upload_enabled === true; state.csrf = result.csrf_token; sessionStorage.setItem("designHubCsrf", state.csrf);
     if (state.user.role === "pending") return showOnly("#pending-view");
     if (state.user.role === "disabled") throw new Error("账号已被禁用");
   } catch (error) { showOnly("#auth-view"); if (error.status !== 401) $("#auth-message").textContent = "暂时无法连接设计空间，请检查服务后重新登录。"; return; }
@@ -100,6 +100,7 @@ async function register(event) {
 async function logout() { try { await api("/api/logout", { method: "POST" }); } catch {} sessionStorage.removeItem("designHubCsrf"); location.reload(); }
 
 async function loadProjects() {
+  $("#snapshot-jobs-button").classList.add("hidden");
   state.projects = (await api("/api/projects")).projects;
   state.projectPreviews = new Map(); state.spotlightProjectId = state.projects[0]?.id || null;
   $("#studio-showcase").innerHTML = '<div class="showcase-placeholder"><span class="brand-symbol">✳</span><p>为好设计，留一个位置。</p></div>';
@@ -174,7 +175,7 @@ async function openProject(projectId, push = true) {
   $("#home-button").classList.remove("hidden"); $("#topbar-title").textContent = state.project.name; $("#crumb").textContent = "设计";
   const canEdit = ["editor", "owner", "admin"].includes(state.project.access_role); const canManage = ["owner", "admin"].includes(state.project.access_role);
   $("#delete-project-button").classList.toggle("hidden", !canManage);
-  $("#new-folder-button").classList.toggle("hidden", !canEdit); $("#members-button").classList.toggle("hidden", !canManage); $("#recycle-button").classList.toggle("hidden", !canEdit);
+  $("#new-folder-button").classList.toggle("hidden", !canEdit); $("#members-button").classList.toggle("hidden", !canManage); $("#recycle-button").classList.toggle("hidden", !canEdit); $("#snapshot-jobs-button").classList.toggle("hidden", !canEdit || !state.snapshotEnabled);
   showWorkspace("#stage-view"); shellMode("stage"); setSidebarCollapsed("stage", innerWidth < 760 || state.stageSidebarCollapsed); renderGroups(); renderStage(); requestAnimationFrame(fitStage); if (push) setRoute(`/projects/${projectId}`);
   } finally { done(); }
 }
@@ -602,6 +603,27 @@ async function copyAiLink() {
 
 async function createProject() { const values = await promptDialog("新建项目", [{ name: "name", label: "项目名称", required: true }, { name: "description", label: "说明" }]); if (!values) return; const result = await api("/api/projects", { method: "POST", body: values }); toast("项目已创建"); await loadProjects(); await openProject(result.id); }
 async function createFolder() { const values = await promptDialog("新建分组", [{ name: "name", label: "分组名称", required: true }]); if (!values) return; await api(`/api/projects/${state.project.id}/folders`, { method: "POST", body: values }); toast("分组已创建"); await openProject(state.project.id, false); }
+async function openSnapshotJobs() {
+  if (!state.project) return;
+  const projectId = state.project.id; const dialog = $("#snapshot-jobs-dialog");
+  dialog.showModal(); let timer;
+  dialog.addEventListener("close", () => clearTimeout(timer), {once:true});
+  async function refresh() {
+    if (!dialog.open) return;
+    try {
+      const result = await api(`/api/projects/${projectId}/snapshot-jobs`);
+      if (!dialog.open) return;
+      $("#snapshot-jobs-content").innerHTML = result.jobs.length ? `<table class="management-table"><thead><tr><th>任务</th><th>进度</th><th>结果</th><th>操作</th></tr></thead><tbody>${result.jobs.map((job) => `<tr><td>${escapeHtml(job.id.slice(0,8))}</td><td>${escapeHtml(job.phase || job.state)} · ${job.state === "receiving" ? `${job.received || 0}/${job.size} 字节` : `${job.done}/${job.total}`}</td><td>${escapeHtml(job.error || (job.state === "complete" ? `已发布 ${(job.results || []).length} 张画板` : ""))}</td><td>${["complete","failed","cancelled"].includes(job.state) ? "—" : `<button type="button" class="secondary" data-cancel-snapshot="${escapeHtml(job.id)}">取消</button>`}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">暂无任务。完成任务记录保留一天，快照和临时资源会自动清理。</p>';
+      $$("[data-cancel-snapshot]").forEach((button) => button.addEventListener("click", () => run(async () => {
+        button.disabled = true;
+        try { await api(`/api/projects/${projectId}/snapshot-jobs/${button.dataset.cancelSnapshot}/cancel`, {method:"POST",body:{}}); toast("已请求取消"); }
+        finally { button.disabled = false; }
+      })));
+    } catch (error) { if (dialog.open) $("#snapshot-jobs-content").textContent = error.message; }
+    if (dialog.open) timer = setTimeout(refresh, 2000);
+  }
+  await refresh();
+}
 function promptDialog(title, fields, confirmLabel = "保存") { const dialog = $("#simple-dialog"); dialog.returnValue = "cancel"; $("#dialog-title").textContent = title; $("#dialog-confirm").textContent = confirmLabel; $("#dialog-content").innerHTML = fields.map((field) => `<label>${escapeHtml(field.label)}<input name="${escapeHtml(field.name)}" value="${escapeHtml(field.value || '')}" ${field.maxLength ? `maxlength="${Number(field.maxLength)}"` : ''} ${field.type === "password" ? 'type="password" minlength="8" autocomplete="new-password"' : ""} ${field.required ? "required" : ""}></label>`).join(""); dialog.showModal(); return new Promise((resolve) => dialog.addEventListener("close", () => { resolve(dialog.returnValue === "default" ? Object.fromEntries(new FormData($("#dialog-form"))) : null); $("#dialog-form").reset(); }, { once: true })); }
 
 async function openUsers() {
@@ -683,7 +705,7 @@ $("#login-form").addEventListener("submit", login); $("#register-form").addEvent
 $("#home-button").addEventListener("click", () => showDashboard());
 $("#delete-project-button").addEventListener("click", () => run(deleteCurrentProject));
 $("#audit-button").addEventListener("click", () => run(() => openAudit(null,'')));
-for (const [selector, action] of [["#new-project-button", createProject], ["#new-folder-button", createFolder], ["#users-button", openUsers], ["#api-keys-button", () => openApiKeys()], ["#members-button", openMembers], ["#recycle-button", openRecycle], ["#copy-screen-prompt", copyScreenPrompt], ["#copy-ai-link", copyAiLink], ["#delete-artboard", deleteCurrentArtboard]]) $(selector).addEventListener("click", () => run(action));
+for (const [selector, action] of [["#snapshot-jobs-button", openSnapshotJobs], ["#new-project-button", createProject], ["#new-folder-button", createFolder], ["#users-button", openUsers], ["#api-keys-button", () => openApiKeys()], ["#members-button", openMembers], ["#recycle-button", openRecycle], ["#copy-screen-prompt", copyScreenPrompt], ["#copy-ai-link", copyAiLink], ["#delete-artboard", deleteCurrentArtboard]]) $(selector).addEventListener("click", () => run(action));
 $("#back-to-stage").addEventListener("click", () => run(() => openProject(state.project.id))); $("#version-select").addEventListener("change", (event) => run(() => loadVersion(event.target.value))); $("#zoom-range").addEventListener("input", (event) => setZoom(event.target.value));
 $("#stage-fit").addEventListener("click", fitStage); $("#stage-minus").addEventListener("click", () => setStageZoom(state.stageZoom / 1.15)); $("#stage-plus").addEventListener("click", () => setStageZoom(state.stageZoom * 1.15));
 $("#stage-sidebar-close").addEventListener("click", () => setSidebarCollapsed("stage", true)); $("#stage-sidebar-open").addEventListener("click", () => setSidebarCollapsed("stage", false));

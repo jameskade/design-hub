@@ -4,11 +4,11 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/script.js'), 'utf8');
 const projectId = '11111111-1111-1111-1111-111111111111';
 const folderId = '22222222-2222-2222-2222-222222222222';
-function run(valid) {
-  const jobs = [], calls = [], alerts = [];
+function run(valid, mode = 'local') {
+  const calls = [], alerts = [], dispatched = [];
   let configuredOrigin = 'http://first-server:8765';
   const context = vm.createContext({console, require(name) {
-    if (name === 'timers') return {setTimeout: fn => jobs.push(fn)};
+    if (name === './local-upload' || name === './snapshot') return options => dispatched.push({name,options});
     if (name === 'sketch/ui') return {message() {}, alert: (...args) => alerts.push(args)};
     if (name === 'sketch/settings') return {settingForKey: () => configuredOrigin};
     return {};
@@ -16,38 +16,35 @@ function run(valid) {
   vm.runInContext(source, context);
   Object.assign(context, {project: {id: valid ? projectId : undefined, name: 'project'}, folder: {id:folderId, name:'folder'}, calls, projectId, folderId});
   vm.runInContext(`
-    confirmUpload = () => true;
-    uploadProgress = () => ({update(){}, finish(){}, close(){}});
-    buildPayload = (board, id) => {
-      if(id !== folderId) throw new Error('目录快照失效');
-      return {artboards:[{sketch_id:board.id}]};
-    };
-    collectAssetLayers = () => [];
+    confirmProcessingMode = () => ${JSON.stringify(mode)};
     request = (method, path, body, token, selectedOrigin) => {
       calls.push({path,body,token,selectedOrigin});
-      if(path.endsWith('/commit')) return {results:[{sketch_id:'board',status:'updated'}]};
-      return {upload_id:'33333333-3333-3333-3333-333333333333'};
+      return {snapshot_upload_enabled:true,parallel_upload_enabled:true};
     };
-    uploadToFolder('test-token',project,folder,[{id:'board',name:'board'}]);
+    uploadWithProcessingMode('test-token',project,folder,[{id:'board',name:'board'}]);
     // 回调退出后即使原对象不再提供 ID，后续任务仍必须使用已选目标。
     delete project.id; delete folder.id;
   `, context);
   configuredOrigin = 'http://another-server:8765';
-  while (jobs.length) jobs.shift()();
-  if (valid) {
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].path, `/api/projects/${projectId}/uploads`);
-    assert.equal(calls[0].body.folder_id, folderId);
+  if (valid && mode) {
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, '/api/me');
     assert(calls.every(c => c.token === 'test-token' && !c.path.includes('undefined')));
     assert(calls.every(c => c.selectedOrigin === 'http://first-server:8765'));
-    assert(alerts[0][1].includes('更新 1'));
+    assert.equal(dispatched.length,1);
+    assert.equal(dispatched[0].name,mode==='local'?'./local-upload':'./snapshot');
+    assert.equal(dispatched[0].options.projectId,projectId);
+    assert.equal(dispatched[0].options.folderId,folderId);
+    assert.equal(dispatched[0].options.origin,'http://first-server:8765');
+    assert.equal(dispatched[0].options.token,'test-token');
   } else {
     assert.equal(calls.length, 0);
-    assert.equal(alerts.length, 1);
-    assert.equal(alerts[0][0], '无法开始上传');
+    assert.equal(dispatched.length,0);
+    assert.equal(alerts.length, valid ? 0 : 1);
+    if (!valid) assert.equal(alerts[0][0], '无法上传');
   }
 }
-run(true); run(false);
+run(true); run(true,'server'); run(true,null); run(false);
 for (const mode of ['same','changed','cancel','invalid']) {
   const values = {'designHub.serverURL':'http://first-server:8765','designHub.sessionToken':'existing-token'};
   let input, called=0;

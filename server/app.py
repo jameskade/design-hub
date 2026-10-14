@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_VERSION = json.loads((ROOT / "sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/manifest.json").read_text(encoding="utf-8"))["version"]
 STATIC_DIR = ROOT / "server" / "static"
 # 只发布安装必需的已知文件；新增插件资源时同步此白名单，禁止打包服务工作目录。
-PLUGIN_DOWNLOAD_FILES = ("Contents/Sketch/manifest.json", "Contents/Sketch/script.js")
+PLUGIN_DOWNLOAD_FILES = ("Contents/Sketch/manifest.json", "Contents/Sketch/script.js", "Contents/Sketch/snapshot.js", "Contents/Sketch/local-upload.js")
 DATA_DIR = Path(os.environ.get("DESIGN_HUB_DATA_DIR", ROOT / "data")).resolve()
 DB_PATH = DATA_DIR / "design-hub.sqlite3"
 PROJECT_DATA_DIR = DATA_DIR / "projects"
@@ -45,6 +45,22 @@ SESSION_DAYS = 7
 PLUGIN_TOKEN_DAYS = 30
 PASSWORD_ITERATIONS = 310_000
 WRITE_LOCK = threading.RLock()
+SNAPSHOT_LOCK = threading.Lock()
+SNAPSHOT_MANAGER = None
+
+
+def snapshot_manager():
+    global SNAPSHOT_MANAGER
+    if os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED") != "1":
+        raise ApiError(503, "快照上传尚未启用，请使用原上传入口")
+    with SNAPSHOT_LOCK:
+        if SNAPSHOT_MANAGER is None:
+            try:
+                from .snapshot_jobs import SnapshotJobs
+            except ImportError:
+                from snapshot_jobs import SnapshotJobs
+            SNAPSHOT_MANAGER = SnapshotJobs(sys.modules[__name__])
+    return SNAPSHOT_MANAGER
 
 SYSTEM_ROLES = {"pending", "developer", "designer", "admin", "disabled"}
 PROJECT_ROLES = {"viewer", "editor", "owner"}
@@ -789,7 +805,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if session["kind"] == "api_key" and method != "GET":
             raise ApiError(403, "API Key 只允许读取数据")
         if path == "/api/me" and method == "GET":
-            return self._json(200, {"user": user, "auth_kind": session["kind"], "csrf_token": session["csrf_token"]})
+            return self._json(200, {"user": user, "auth_kind": session["kind"], "csrf_token": session["csrf_token"], "snapshot_upload_enabled": os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED") == "1", "parallel_upload_enabled": True})
         if path == "/api/logout" and method == "POST":
             with WRITE_LOCK, db_connection() as db:
                 db.execute("DELETE FROM sessions WHERE id = ?", (session["id"],))
@@ -821,6 +837,10 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             return self._create_project(user)
         if len(parts) >= 3 and parts[:2] == ["api", "projects"]:
             project_id = parts[2]
+            if 4 <= len(parts) <= 6 and parts[3] == "snapshot-jobs":
+                with db_connection() as db:
+                    require_project_role(db, user, project_id, {"editor", "owner", "admin"})
+                return snapshot_manager().route(self, method, project_id, user, parts[4] if len(parts) >= 5 else None, parts[5] if len(parts) == 6 else None)
             if len(parts) == 3 and method == "GET":
                 return self._project_detail(user, project_id)
             if len(parts) == 3 and method == "DELETE":
@@ -1274,7 +1294,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 target = UPLOAD_DIR / upload_id
                 target.mkdir()
                 board.pop("assets", None)
-                (target / "session.json").write_text(canonical_json({"user_id": user["id"], "project_id": project_id, "folder_id": folder_id, "board": board}), encoding="utf-8")
+                (target / "session.json").write_text(canonical_json({"user_id": user["id"], "project_id": project_id, "folder_id": folder_id, "board": board, "parallel_chunks": data.get("parallel_chunks") is True}), encoding="utf-8")
                 return self._json(201, {"upload_id": upload_id})
             if not re.fullmatch(r"[0-9a-f-]{36}", upload_id):
                 raise ApiError(400, "上传任务 ID 无效")
@@ -1290,21 +1310,32 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             chunks = sorted(target.glob("chunk-*.json"))
             if action == "chunk":
                 assets = data.get("assets")
-                if type(data.get("index")) is not int or data["index"] != len(chunks) or not isinstance(assets, list) or not 1 <= len(assets) <= 32:
+                index = data.get("index")
+                parallel = session.get("parallel_chunks") is True
+                if type(index) is not int or not 0 <= index < 20000 or (not parallel and index != len(chunks)) or not isinstance(assets, list) or not 1 <= len(assets) <= 32:
                     raise ApiError(400, "资源批次序号或数量无效")
-                if len(chunks) >= 20000 or sum(p.stat().st_size for p in target.iterdir()) + len(canonical_json(data).encode("utf-8")) > 2 * 1024**3:
+                encoded = canonical_json(assets).encode("utf-8")
+                chunk_path = target / f"chunk-{index:06d}.json"
+                if parallel and chunk_path.exists():
+                    if chunk_path.read_bytes() != encoded:
+                        raise ApiError(409, "同一批次的资源内容不一致")
+                    return self._json(200, {"index": index, "received": len(assets)})
+                received = sum(p.stat().st_size for p in target.iterdir())
+                if len(chunks) >= 20000 or received + len(encoded) > 2 * 1024**3:
                     raise ApiError(413, "单画板暂存超过安全容量")
                 for asset in assets:
                     if not isinstance(asset, dict) or not decode_file(asset.get("data_base64"), "资源"):
                         raise ApiError(400, "资源为空或无效")
                 temporary = target / "chunk.tmp"
-                temporary.write_text(canonical_json(assets), encoding="utf-8")
-                os.replace(temporary, target / f"chunk-{len(chunks):06d}.json")
+                temporary.write_bytes(encoded)
+                os.replace(temporary, chunk_path)
                 return self._json(200, {"index": data["index"], "received": len(assets)})
             if action != "commit":
                 raise ApiError(404, "上传操作不存在")
             if type(data.get("chunks")) is not int or data["chunks"] != len(chunks) or type(data.get("assets")) is not int:
                 raise ApiError(400, "上传批次不完整")
+            if any(path.name != f"chunk-{index:06d}.json" for index, path in enumerate(chunks)):
+                raise ApiError(400, "上传批次存在缺口，未发布")
             count = sum(len(json.loads(p.read_text(encoding="utf-8"))) for p in chunks)
             if count != data["assets"]:
                 raise ApiError(400, "上传资源不完整")
@@ -1324,7 +1355,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             shutil.rmtree(target)
         return self._json(200, {"results": [result]})
 
-    def _store_artboard(self, db, user, project_id, folder_id, board, asset_source=None):
+    def _store_artboard(self, db, user, project_id, folder_id, board, asset_source=None, before_publish=None):
         sketch_id = str(board.get("sketch_id", "")).strip()
         name = str(board.get("name", "")).strip()
         metadata = board.get("metadata")
@@ -1386,6 +1417,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 target = assets_dir / filename
                 target.write_bytes(raw)
                 stored_assets.append((asset_id, asset, target))
+            if before_publish:
+                before_publish(final_dir)
             os.replace(temp_dir, final_dir)
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1750,6 +1783,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 def main():
     init_database()
     ensure_initial_admin()
+    if os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED") == "1":
+        snapshot_manager()
     server = ThreadingHTTPServer((HOST, PORT), DesignHubHandler)
     print(f"[Server] Design Hub listening on http://{HOST}:{PORT}")
     try:
@@ -1757,6 +1792,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if SNAPSHOT_MANAGER is not None:
+            SNAPSHOT_MANAGER.close()
         server.server_close()
 
 

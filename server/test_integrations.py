@@ -144,6 +144,20 @@ def main():
             admin.json(f"{staged_base}/{sid}/cancel", {})
             assert not (app.UPLOAD_DIR / sid).exists()
             print("PASS: 520 资源分批发布、缺批/计数错误保留旧版本、拒绝重复批次、权限、取消清理、重复上传 unchanged")
+            parallel_board = dict(stage_body["board"], sketch_id="parallel-fixture", name="并行批次测试")
+            sid = admin.json(staged_base, {"folder_id":folder,"board":parallel_board,"parallel_chunks":True}, expected=201)["upload_id"]
+            parallel_stage = f"{staged_base}/{sid}"
+            one = upload["artboards"][0]["assets"]
+            assert admin.json(parallel_stage+"/chunk", {"index":1,"assets":one})["index"] == 1
+            assert admin.json(parallel_stage+"/chunk", {"index":1,"assets":one})["received"] == len(one)
+            changed = [dict(one[0],name="不同批次内容")]
+            admin.call(parallel_stage+"/chunk", {"index":1,"assets":changed}, expected=409)
+            admin.call(parallel_stage+"/commit", {"chunks":1,"assets":len(one)}, expected=400)
+            admin.json(parallel_stage+"/chunk", {"index":0,"assets":one})
+            result=admin.json(parallel_stage+"/commit", {"chunks":2,"assets":len(one)*2})["results"][0]
+            assert result["status"] == "created" and not (app.UPLOAD_DIR/sid).exists()
+            assert admin.json('/api/me')['parallel_upload_enabled'] is True
+            print('PASS: 并行批次乱序接收、重试幂等、冲突拒绝、缺口不发布、完整提交清理')
             downloaded = root / "downloaded_mcp.py"
             downloaded.write_bytes(script)
             requests = [

@@ -100,7 +100,7 @@ info "starting Design Hub on $HOST:$PORT"
 mkdir -p "$(dirname "$LAUNCH_PLIST")"
 launchctl bootout "$LAUNCH_DOMAIN/$LAUNCH_LABEL" 2>/dev/null || true
 "$PYTHON_BIN" - "$LAUNCH_PLIST" "$PYTHON_BIN" "$SCRIPT_DIR/server/app.py" "$SCRIPT_DIR" "$LOG_FILE" "$HOST" "$PORT" "${DESIGN_HUB_ADMIN_USERNAME:-admin}" "${DESIGN_HUB_ADMIN_PASSWORD:-}" "${DESIGN_HUB_MAX_UPLOAD_MB:-150}" <<'PY'
-import plistlib, sys
+import os, plistlib, sys
 plist, python, app, cwd, log, host, port, username, password, upload_mb = sys.argv[1:]
 payload = {
     "Label": "com.ghost.design-hub",
@@ -112,6 +112,8 @@ payload = {
         "DESIGN_HUB_ADMIN_USERNAME": username,
         "DESIGN_HUB_ADMIN_PASSWORD": password,
         "DESIGN_HUB_MAX_UPLOAD_MB": upload_mb,
+        "DESIGN_HUB_SNAPSHOT_ENABLED": os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED", "0"),
+        "DESIGN_HUB_SKETCHTOOL": os.environ.get("DESIGN_HUB_SKETCHTOOL", "/Applications/Sketch.app/Contents/MacOS/sketchtool"),
     },
     "RunAtLoad": True,
     "StandardOutPath": log,
