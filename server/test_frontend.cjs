@@ -4,7 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "static/app.js"), "utf8");
+const indexSource = fs.readFileSync(path.join(__dirname, "static/index.html"), "utf8");
+const styleSource = fs.readFileSync(path.join(__dirname, "static/styles.css"), "utf8");
 new vm.Script(source);
+assert(indexSource.includes('id="download-project-sketch"') && !indexSource.includes('id="download-folder-sketch"'));
+assert(indexSource.includes('data-label="导出 Sketch"') && indexSource.includes('aria-label="关闭上传任务"'));
+assert(source.includes('/api/projects/${state.project.id}/sketch') && source.includes('stage-folder-export') && source.includes('stage-board-export'));
+assert(styleSource.includes('.snapshot-status.complete') && styleSource.includes('.stage-context-export'));
 
 // 提取真实函数声明，避免在 Node 中模拟整套浏览器或复制实现。
 function declaration(name, code = source) {
@@ -217,11 +223,11 @@ new vm.Script(connectSource);
 vm.runInContext(declaration("buildMcpConfig", connectSource), context);
 vm.runInContext(declaration("buildNpxMcpConfig", connectSource), context);
 context.URL = URL;
-const npmConfig = JSON.parse(evaluate('buildNpxMcpConfig("json", "npx", "http://192.168.1.100:8765", "/downloads/design-hub-mcp-1.0.2.tgz")')).mcpServers['design-hub'];
-assert.equal(npmConfig.args[1], '--package=http://192.168.1.100:8765/downloads/design-hub-mcp-1.0.2.tgz');
+const npmConfig = JSON.parse(evaluate('buildNpxMcpConfig("json", "npx", "http://192.168.1.100:8765", "/downloads/design-hub-mcp-1.0.3.tgz")')).mcpServers['design-hub'];
+assert.equal(npmConfig.args[1], '--package=http://192.168.1.100:8765/downloads/design-hub-mcp-1.0.3.tgz');
 assert.equal(npmConfig.args[3], '--base-url=http://192.168.1.100:8765');
 assert(npmConfig.env.DESIGN_HUB_API_KEY);
-assert.throws(() => evaluate('buildNpxMcpConfig("json", "npx", "http://user:secret@localhost", "/downloads/design-hub-mcp-1.0.2.tgz")'));
+assert.throws(() => evaluate('buildNpxMcpConfig("json", "npx", "http://user:secret@localhost", "/downloads/design-hub-mcp-1.0.3.tgz")'));
 context.configPath = '/Users/example/Design Files/a "quoted" file.py';
 const config = evaluate('buildMcpConfig("codex", "python3", configPath)');
 assert.ok(config.startsWith('[mcp_servers.design-hub]'));

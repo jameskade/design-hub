@@ -24,7 +24,7 @@ def main():
         app.ensure_initial_admin()
         from source_packages import SourcePackages, split_design
         from sketch_parser import parse_design
-        from directory_sketch import build_directory
+        from directory_sketch import build_directory, build_project
 
         document = {
             "pages": [{"_ref": "pages/main"}, {"_ref": "pages/symbols"}],
@@ -54,6 +54,11 @@ def main():
         with zipfile.ZipFile(io.BytesIO(directory_sketch)) as directory_archive:
             metadata=json.loads(directory_archive.read("meta.json"))
             assert set(next(iter(metadata["pagesAndArtboards"].values()))["artboards"])=={"BOARD-A","BOARD-B"}
+        project_sketch,_=build_project([("目录 A",[("BOARD-A",first)]),("目录 B",[("BOARD-B",second)])])
+        with zipfile.ZipFile(io.BytesIO(project_sketch)) as project_archive:
+            pages=list(json.loads(project_archive.read("meta.json"))["pagesAndArtboards"].values())
+            by_name={page["name"]:set(page["artboards"]) for page in pages}
+            assert by_name=={"目录 A":{"BOARD-A"},"目录 B":{"BOARD-B"}}
         conflicting=dict(second);conflicting["images/shared.png"]=b"different"
         try:
             build_directory([("BOARD-A",first),("BOARD-B",conflicting)],"冲突目录")
@@ -86,7 +91,7 @@ def main():
             assert db.execute("SELECT count(*) FROM source_packages").fetchone()[0]==0
             assert db.execute("SELECT count(*) FROM source_blobs").fetchone()[0]==0
         assert garbage
-        print("PASS: 一稿一源、传递依赖、共享 Blob 去重、标准 Sketch 重建、版本化图层解析")
+        print("PASS: 一稿一源、共享 Blob、单目录/多目录 Sketch、标准重建、版本化图层解析")
 
 
 if __name__ == "__main__":

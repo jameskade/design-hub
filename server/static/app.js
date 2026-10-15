@@ -32,6 +32,8 @@ function icon(name, size = 18) {
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-1 .6-1.5 1-1.5 2M12 17h.01"/>',
     download: '<path d="M12 3v12m-5-5 5 5 5-5M4 15v5h16v-5"/>',
+    sketch: '<path d="m3 8 4-4h10l4 4-9 12L3 8Z"/><path d="M3 8h18M7 4l2 4 3-4 3 4 2-4M9 8l3 12 3-12"/>',
+    activity: '<path d="M4 19V9m5 10V5m5 14v-7m5 7V3"/>',
     plug: '<path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-12 0V8Zm6 9v4"/>',
   };
   return `<svg class="icon-svg" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || ""}</svg>`;
@@ -101,6 +103,7 @@ async function logout() { try { await api("/api/logout", { method: "POST" }); } 
 
 async function loadProjects() {
   $("#snapshot-jobs-button").classList.add("hidden");
+  $("#download-project-sketch").classList.add("hidden");
   state.projects = (await api("/api/projects")).projects;
   state.projectPreviews = new Map(); state.spotlightProjectId = state.projects[0]?.id || null;
   $("#studio-showcase").innerHTML = '<div class="showcase-placeholder"><span class="brand-symbol">✳</span><p>为好设计，留一个位置。</p></div>';
@@ -159,6 +162,7 @@ function showDashboard(push = true) {
   state.navigationEpoch++; state.versionEpoch++; $("#ai-context-link").removeAttribute("href");
   state.project = null; showWorkspace("#dashboard-view"); $("#home-button").classList.add("hidden");
   $("#delete-project-button").classList.add("hidden");
+  $("#download-project-sketch").classList.add("hidden");
   $("#topbar-title").textContent = "Design Hub"; $("#crumb").textContent = "项目"; $("#members-button").classList.add("hidden");
   $("#recycle-button").classList.toggle("hidden", !["designer", "admin"].includes(state.user.role));
   shellMode("dashboard"); if (push) setRoute("/");
@@ -176,13 +180,14 @@ async function openProject(projectId, push = true) {
   const canEdit = ["editor", "owner", "admin"].includes(state.project.access_role); const canManage = ["owner", "admin"].includes(state.project.access_role);
   $("#delete-project-button").classList.toggle("hidden", !canManage);
   $("#new-folder-button").classList.toggle("hidden", !canEdit); $("#members-button").classList.toggle("hidden", !canManage); $("#recycle-button").classList.toggle("hidden", !canEdit); $("#snapshot-jobs-button").classList.toggle("hidden", !canEdit || !state.snapshotEnabled);
+  const projectExport=$("#download-project-sketch"); projectExport.classList.toggle("hidden", !state.artboards.length); projectExport.disabled=!state.artboards.length || state.artboards.some((board)=>!board.source_available); projectExport.title=projectExport.disabled ? "项目中有旧稿，重新上传后才能导出项目 Sketch" : "把当前项目的全部目录导出为一个 Sketch";
   showWorkspace("#stage-view"); shellMode("stage"); setSidebarCollapsed("stage", innerWidth < 760 || state.stageSidebarCollapsed); renderGroups(); renderStage(); requestAnimationFrame(fitStage); if (push) setRoute(`/projects/${projectId}`);
   } finally { done(); }
 }
 function boardsInView() { return state.folderId ? state.artboards.filter((board) => board.folder_id === state.folderId) : state.artboards; }
 function renderGroups() {
   const folder=state.folders.find(item=>item.id===state.stageSelectedFolderId); const count=folder?state.artboards.filter(board=>board.folder_id===folder.id).length:state.artboards.length;
-  $("#stage-group-title").textContent = folder?.name || "全部"; $("#stage-count").textContent = count; $("#download-folder-sketch").classList.toggle("hidden",!folder); renderFolderTree("#folder-list", "stage");
+  $("#stage-group-title").textContent = folder?.name || "全部"; $("#stage-count").textContent = count; renderFolderTree("#folder-list", "stage");
 }
 function renderFolderTree(selector, mode) {
   const target = $(selector); const query = $(`#${mode}-search`).value.trim().toLocaleLowerCase();
@@ -203,24 +208,45 @@ function boardPositions(boards) {
       if (seen.has(key)) { x = baseX + (index % 6) * 470; y = sectionStart + Math.floor(index / 6) * 980; }
       seen.add(`${Math.round(x)}:${Math.round(y)}`); positions.push({ board, x, y }); sectionBottom = Math.max(sectionBottom, y + Number(board.height || 0)); sectionRight = Math.max(sectionRight, x + Number(board.width || 0));
     });
-    sections.push({ folder, x: baseX - 48, y: sectionStart - 104, width: sectionRight - baseX + 96, height: sectionBottom - sectionStart + 152, labelX: baseX, labelY: sectionStart - 72, count: items.length });
+    sections.push({ folder, x: baseX - 48, y: sectionStart - 104, width: sectionRight - baseX + 96, height: sectionBottom - sectionStart + 152, labelX: baseX, labelY: sectionStart - 72, count: items.length, sourceReady: items.every((item)=>item.source_available) });
     cursorY = sectionBottom + 220;
   }); return { positions, sections };
+}
+function stageExportAction(className, left, top, label, sourceReady, url, filename, unavailableTitle) {
+  const action = document.createElement("button"); action.className = `stage-context-export ${className}`; action.style.cssText = `left:${left}px;top:${top}px`; action.setAttribute("aria-label", label); action.innerHTML = `${icon("sketch", 16)}<span>${className === "stage-folder-export" ? "导出目录 Sketch" : "导出 Sketch"}</span>`;
+  action.disabled = !sourceReady; action.title = sourceReady ? label : unavailableTitle;
+  action.addEventListener("click", (event) => { event.stopPropagation(); triggerDownload(url, filename); });
+  return action;
 }
 function renderStage() {
   const world = $("#stage-world"); world.innerHTML = "";
   $("#stage-empty").classList.toggle("hidden", Boolean(state.artboards.length));
   $("#stage-open-selected").classList.toggle("hidden", !state.stageSelectedId);
   const layout = boardPositions(boardsInView());
-  layout.sections.forEach(({ folder, x, y, width, height, labelX, labelY, count }) => { const surface = document.createElement("div"); surface.className = `stage-folder-surface${folder.id === state.stageSelectedFolderId ? " selected" : ""}`; surface.dataset.folderId = folder.id; surface.style.cssText = `left:${x}px;top:${y}px;width:${width}px;height:${height}px`; world.append(surface); const label = document.createElement("div"); label.className = "stage-folder-label"; label.style.cssText = `left:${labelX}px;top:${labelY}px`; label.innerHTML = `<strong>${escapeHtml(folder.name)}</strong><span>${count} 个设计稿</span>`; world.append(label); });
+  layout.sections.forEach(({ folder, x, y, width, height, labelX, labelY, count, sourceReady }) => {
+    const selected = folder.id === state.stageSelectedFolderId && !state.stageSelectedId;
+    const surface = document.createElement("div"); surface.className = `stage-folder-surface${selected ? " selected" : ""}`; surface.dataset.folderId = folder.id; surface.style.cssText = `left:${x}px;top:${y}px;width:${width}px;height:${height}px`; world.append(surface);
+    const label = document.createElement("div"); label.className = "stage-folder-label"; label.style.cssText = `left:${labelX}px;top:${labelY}px`; label.innerHTML = `<strong>${escapeHtml(folder.name)}</strong><span>${count} 个设计稿</span>`; world.append(label);
+    if (selected) {
+      world.append(stageExportAction("stage-folder-export", x + width, y + 22, `导出${folder.name}目录 Sketch`, sourceReady, `/api/folders/${folder.id}/sketch`, `${folder.name}.sketch`, "目录中有旧稿，重新上传后才能导出"));
+    }
+  });
   layout.positions.forEach(({ board, x, y }) => {
     const node = document.createElement("button"); node.className = `stage-board${state.stageSelectedId === board.id ? " selected" : ""}`; node.dataset.boardId = board.id;
     node.style.cssText = `left:${x}px;top:${y}px;width:${board.width}px;height:${board.height}px`;
     node.innerHTML = `<span class="stage-board-name">${escapeHtml(board.name)}</span><span class="stage-board-frame"><img src="/api/versions/${board.current_version_id}/preview" alt=""></span>`;
-    node.addEventListener("click", (event) => { event.stopPropagation(); state.stageSelectedId = board.id; state.stageSelectedFolderId = board.folder_id; $$(".stage-board").forEach((element) => element.classList.toggle("selected", element.dataset.boardId === board.id)); $$(".stage-folder-surface").forEach((element) => element.classList.toggle("selected", element.dataset.folderId === board.folder_id)); $("#stage-open-selected").classList.remove("hidden"); renderGroups(); });
+    node.addEventListener("click", (event) => {
+      event.stopPropagation(); state.stageSelectedId = board.id; state.stageSelectedFolderId = board.folder_id;
+      $$(".stage-board").forEach((element) => element.classList.toggle("selected", element.dataset.boardId === board.id)); $$(".stage-folder-surface").forEach((element) => element.classList.remove("selected")); $$(".stage-context-export").forEach((element) => element.remove());
+      world.append(stageExportAction("stage-board-export", x + Number(board.width), y - 42, `导出${board.name}设计稿 Sketch`, Boolean(board.source_available), `/api/artboards/${board.id}/source`, `${board.name}.sketch`, "旧稿重新上传后才能导出"));
+      $("#stage-open-selected").classList.remove("hidden"); renderGroups();
+    });
     node.addEventListener("dblclick", (event) => { event.stopPropagation(); run(() => openArtboard(board.id)); });
     node.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); run(() => openArtboard(board.id)); } });
     node.querySelector("img").decoding = "async"; world.append(node);
+    if (state.stageSelectedId === board.id) {
+      world.append(stageExportAction("stage-board-export", x + Number(board.width), y - 42, `导出${board.name}设计稿 Sketch`, Boolean(board.source_available), `/api/artboards/${board.id}/source`, `${board.name}.sketch`, "旧稿重新上传后才能导出"));
+    }
   }); updateStageTransform();
 }
 let cameraFrame = 0;
@@ -237,7 +263,7 @@ function focusStageBox(box, maxZoom = 1.15, animated = true) {
 }
 function focusStageBoard(id) { const node = $(`.stage-board[data-board-id="${id}"]`); if (!node) return; focusStageBox({ x: parseFloat(node.style.left) - 34, y: parseFloat(node.style.top) - 48, width: parseFloat(node.style.width) + 68, height: parseFloat(node.style.height) + 96 }, 1); }
 function focusStageFolder(id) { const node = $(`.stage-folder-surface[data-folder-id="${id}"]`); if (!node) return; focusStageBox({ x: parseFloat(node.style.left), y: parseFloat(node.style.top), width: parseFloat(node.style.width), height: parseFloat(node.style.height) }, 1.05); }
-function updateStageTransform() { $("#stage-world").style.transform = `translate(${state.stagePan.x}px, ${state.stagePan.y}px) scale(${state.stageZoom})`; $("#stage-zoom-output").value = `${Math.round(state.stageZoom * 100)}%`; }
+function updateStageTransform() { const world=$("#stage-world"); world.style.transform = `translate(${state.stagePan.x}px, ${state.stagePan.y}px) scale(${state.stageZoom})`; world.style.setProperty("--stage-action-scale", String(1 / state.stageZoom)); $("#stage-zoom-output").value = `${Math.round(state.stageZoom * 100)}%`; }
 function setStageZoom(next, anchorX, anchorY) {
   stopCameraMotion();
   const rect = $("#stage-viewport").getBoundingClientRect(); const x = anchorX ?? rect.width / 2; const y = anchorY ?? rect.height / 2; const previous = state.stageZoom;
@@ -643,7 +669,11 @@ async function openSnapshotJobs() {
     try {
       const result = await api(`/api/projects/${projectId}/snapshot-jobs`);
       if (!dialog.open) return;
-      $("#snapshot-jobs-content").innerHTML = result.jobs.length ? `<table class="management-table"><thead><tr><th>任务</th><th>进度</th><th>结果</th><th>操作</th></tr></thead><tbody>${result.jobs.map((job) => `<tr><td>${escapeHtml(job.id.slice(0,8))}</td><td>${escapeHtml(job.phase || job.state)} · ${job.state === "receiving" ? `${job.received || 0}/${job.size} 字节` : `${job.done}/${job.total}`}</td><td>${escapeHtml(job.error || (job.state === "complete" ? `已发布 ${(job.results || []).length} 张画板` : ""))}</td><td>${["complete","failed","cancelled"].includes(job.state) ? "—" : `<button type="button" class="secondary" data-cancel-snapshot="${escapeHtml(job.id)}">取消</button>`}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">暂无任务。完成任务记录保留一天，快照和临时资源会自动清理。</p>';
+      const terminal = ["complete","failed","cancelled"];
+      const labels = {receiving:"上传中",queued:"等待处理",processing:"处理中",complete:"已完成",failed:"失败",cancelled:"已取消"};
+      const resultText = (job) => { if (job.error) return job.error; if (job.state !== "complete") return "—"; const counts={created:0,updated:0,unchanged:0}; (job.results || []).forEach((item)=>{ if(counts[item.status]!==undefined) counts[item.status]+=1; }); return `新增 ${counts.created} · 更新 ${counts.updated} · 未变化 ${counts.unchanged}`; };
+      const progress = (job) => job.state === "receiving" ? Math.round((job.received || 0) / Math.max(1, job.size || 1) * 100) : Math.round((job.done || 0) / Math.max(1, job.total || 1) * 100);
+      $("#snapshot-jobs-content").innerHTML = result.jobs.length ? `<div class="snapshot-jobs-note">完成记录保留 1 天；源稿快照与临时资源会自动清理。</div><div class="snapshot-table" role="table" aria-label="上传任务列表">${result.jobs.map((job) => { const value=job.state === "complete" ? 100 : progress(job); return `<article class="snapshot-row" role="row"><div class="snapshot-task"><span class="snapshot-status ${escapeHtml(job.state)}">${escapeHtml(labels[job.state] || job.state)}</span><code>${escapeHtml(job.id.slice(0,8))}</code></div><div class="snapshot-progress"><div><span>${escapeHtml(job.phase || labels[job.state] || job.state)}</span><b>${value}%</b></div><progress max="100" value="${value}">${value}%</progress></div><div class="snapshot-result">${escapeHtml(resultText(job))}</div><div class="snapshot-action">${terminal.includes(job.state) ? "" : `<button type="button" class="secondary" data-cancel-snapshot="${escapeHtml(job.id)}">取消任务</button>`}</div></article>`; }).join("")}</div>` : `<div class="snapshot-empty">${icon("activity",28)}<strong>暂无上传任务</strong><span>从 Sketch 发起上传后，处理进度会显示在这里。</span></div>`;
       $$("[data-cancel-snapshot]").forEach((button) => button.addEventListener("click", () => run(async () => {
         button.disabled = true;
         try { await api(`/api/projects/${projectId}/snapshot-jobs/${button.dataset.cancelSnapshot}/cancel`, {method:"POST",body:{}}); toast("已请求取消"); }
@@ -739,7 +769,7 @@ for (const [selector, action] of [["#snapshot-jobs-button", openSnapshotJobs], [
 $("#back-to-stage").addEventListener("click", () => run(() => openProject(state.project.id))); $("#version-select").addEventListener("change", (event) => run(() => loadVersion(event.target.value))); $("#zoom-range").addEventListener("input", (event) => setZoom(event.target.value));
 $("#viewer-directory-tab").addEventListener("click",()=>showViewerNav("directory")); $("#viewer-layer-tab").addEventListener("click",()=>showViewerNav("layers"));
 $("#download-source").addEventListener("click",()=>{ if(state.artboard) triggerDownload(`/api/artboards/${state.artboard.id}/source`,`${state.artboard.name}.sketch`); });
-$("#download-folder-sketch").addEventListener("click",()=>{ const folder=state.folders.find(item=>item.id===state.stageSelectedFolderId); if(folder) triggerDownload(`/api/folders/${folder.id}/sketch`,`${folder.name}.sketch`); });
+$("#download-project-sketch").addEventListener("click",()=>{ if(state.project) triggerDownload(`/api/projects/${state.project.id}/sketch`,`${state.project.name}.sketch`); });
 $("#stage-fit").addEventListener("click", fitStage); $("#stage-minus").addEventListener("click", () => setStageZoom(state.stageZoom / 1.15)); $("#stage-plus").addEventListener("click", () => setStageZoom(state.stageZoom * 1.15));
 $("#stage-sidebar-close").addEventListener("click", () => setSidebarCollapsed("stage", true)); $("#stage-sidebar-open").addEventListener("click", () => setSidebarCollapsed("stage", false));
 $("#viewer-sidebar-close").addEventListener("click", () => setSidebarCollapsed("viewer", true)); $("#viewer-sidebar-open").addEventListener("click", () => setSidebarCollapsed("viewer", false));

@@ -931,6 +931,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 return snapshot_manager().route(self, method, project_id, user, parts[4] if len(parts) >= 5 else None, parts[5] if len(parts) == 6 else None)
             if len(parts) == 3 and method == "GET":
                 return self._project_detail(user, project_id)
+            if len(parts) == 4 and parts[3] == "sketch" and method == "GET":
+                return self._download_project_sketch(user, project_id)
             if len(parts) == 3 and method == "DELETE":
                 return self._delete_project(user, project_id)
             if len(parts) == 4 and parts[3] == "restore" and method == "POST":
@@ -1330,7 +1332,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         with db_connection() as db:
             require_project_role(db, user, project_id, {"viewer", "editor", "owner", "admin"})
             sql = """SELECT artboards.*, artboard_versions.version_no,
-                            artboard_versions.created_at AS version_created_at
+                            artboard_versions.created_at AS version_created_at,
+                            CASE WHEN artboard_versions.source_package_id IS NULL THEN 0 ELSE 1 END AS source_available
                      FROM artboards
                      LEFT JOIN artboard_versions ON artboard_versions.id = artboards.current_version_id
                      WHERE artboards.project_id = ?"""
@@ -1697,6 +1700,49 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in row["name"]) or "design"
         return self._download_bytes(body, safe_name + ".sketch")
 
+    def _cached_collection_sketch(self, db, groups, cache, empty_error, missing_prefix):
+        rows = [row for _, items in groups for row in items]
+        if not rows:
+            raise ApiError(409, empty_error)
+        missing = [row["name"] for row in rows if not row["source_package_id"]]
+        if missing:
+            raise ApiError(409, missing_prefix + "：" + "、".join(missing[:8]) + (" 等" if len(missing) > 8 else ""))
+        state_hash = hashlib.sha256(canonical_json([(name, row["id"], row["source_package_id"], row["package_hash"]) for name, items in groups for row in items]).encode()).hexdigest()
+        target = cache / (state_hash + ".sketch")
+        if target.is_file():
+            return target
+        # 合成稿与上传渲染共用单槽；结构、ID 和逐画板渲染全部通过才发布缓存。
+        with SKETCH_RENDER_LOCK:
+            if target.is_file():
+                return target
+            try:
+                from .source_packages import SourcePackages
+                from .directory_sketch import build_project
+            except ImportError:
+                from source_packages import SourcePackages
+                from directory_sketch import build_project
+            sources = SourcePackages(DATA_DIR / "source-blobs")
+            packages = [(name, [(row["sketch_id"], sources.files(db, row["source_package_id"])) for row in items]) for name, items in groups]
+            body, _ = build_project(packages)
+            cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary = cache / (state_hash + ".tmp")
+            temporary.write_bytes(body); os.chmod(temporary, 0o600)
+            tool = os.environ.get("DESIGN_HUB_SKETCHTOOL", "/Applications/Sketch.app/Contents/MacOS/sketchtool")
+            with tempfile.TemporaryDirectory(prefix="design-hub-sketch-check-") as output:
+                metadata = subprocess.run([tool, "metadata", str(temporary), "--json"], capture_output=True, text=True, timeout=120)
+                duplicates = subprocess.run([tool, "duplicates", str(temporary)], capture_output=True, text=True, timeout=120)
+                rendered = subprocess.run([tool, "export", "artboards", str(temporary), "--output=" + output, "--formats=png", "--scales=1", "--use-id-for-name", "--serial"], capture_output=True, text=True, timeout=300)
+                actual = {path.stem for path in Path(output).glob("*.png")}
+                expected = {row["sketch_id"] for row in rows}
+                if metadata.returncode or duplicates.returncode or "No duplicates found" not in duplicates.stdout + duplicates.stderr or rendered.returncode or actual != expected:
+                    temporary.unlink(missing_ok=True)
+                    raise ApiError(500, "Sketch 生成校验失败，未提供损坏文件")
+            os.replace(temporary, target)
+            for stale in cache.glob("*.sketch"):
+                if stale != target:
+                    stale.unlink(missing_ok=True)
+        return target
+
     def _download_folder_sketch(self, user, folder_id):
         with db_connection() as db:
             folder = db.execute("SELECT id,project_id,name FROM folders WHERE id=? AND deleted_at IS NULL", (folder_id,)).fetchone()
@@ -1710,43 +1756,32 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                    WHERE artboards.folder_id=? AND artboards.deleted_at IS NULL ORDER BY artboards.updated_at,artboards.id""",
                 (folder_id,),
             ).fetchall()
-            if not rows:
-                raise ApiError(409, "目录中没有可导出的设计稿")
-            missing = [row["name"] for row in rows if not row["source_package_id"]]
-            if missing:
-                raise ApiError(409, "以下旧设计稿需要重新上传后才能导出目录 Sketch：" + "、".join(missing[:8]) + (" 等" if len(missing) > 8 else ""))
-            state_hash = hashlib.sha256(canonical_json([(row["id"], row["source_package_id"], row["package_hash"]) for row in rows]).encode()).hexdigest()
-            cache = DATA_DIR / "directory-exports" / folder_id
-            target = cache / (state_hash + ".sketch")
-            if not target.is_file():
-                try:
-                    from .source_packages import SourcePackages
-                    from .directory_sketch import build_directory
-                except ImportError:
-                    from source_packages import SourcePackages
-                    from directory_sketch import build_directory
-                sources = SourcePackages(DATA_DIR / "source-blobs")
-                packages = [(row["sketch_id"], sources.files(db, row["source_package_id"])) for row in rows]
-                body, _ = build_directory(packages, folder["name"])
-                cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-                temporary = cache / (state_hash + ".tmp")
-                temporary.write_bytes(body); os.chmod(temporary, 0o600)
-                tool = os.environ.get("DESIGN_HUB_SKETCHTOOL", "/Applications/Sketch.app/Contents/MacOS/sketchtool")
-                # 目录合成与上传渲染共用单槽；三项验证全部通过才原子发布缓存。
-                with SKETCH_RENDER_LOCK, tempfile.TemporaryDirectory(prefix="design-hub-directory-check-") as output:
-                    metadata = subprocess.run([tool, "metadata", str(temporary), "--json"], capture_output=True, text=True, timeout=120)
-                    duplicates = subprocess.run([tool, "duplicates", str(temporary)], capture_output=True, text=True, timeout=120)
-                    rendered = subprocess.run([tool, "export", "artboards", str(temporary), "--output=" + output, "--formats=png", "--scales=1", "--use-id-for-name", "--serial"], capture_output=True, text=True, timeout=300)
-                    actual = {path.stem for path in Path(output).glob("*.png")}
-                    expected = {row["sketch_id"] for row in rows}
-                    if metadata.returncode or duplicates.returncode or "No duplicates found" not in duplicates.stdout + duplicates.stderr or rendered.returncode or actual != expected:
-                        temporary.unlink(missing_ok=True)
-                        raise ApiError(500, "目录 Sketch 生成校验失败，未提供损坏文件")
-                os.replace(temporary, target)
-                for stale in cache.glob("*.sketch"):
-                    if stale != target:
-                        stale.unlink(missing_ok=True)
+            target = self._cached_collection_sketch(db, [(folder["name"], rows)], DATA_DIR / "directory-exports" / folder_id, "目录中没有可导出的设计稿", "以下旧设计稿需要重新上传后才能导出目录 Sketch")
         safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in folder["name"]) or "directory"
+        return self._send_file(target, safe_name + ".sketch")
+
+    def _download_project_sketch(self, user, project_id):
+        with db_connection() as db:
+            project = db.execute("SELECT id,name FROM projects WHERE id=? AND deleted_at IS NULL", (project_id,)).fetchone()
+            if not project:
+                raise ApiError(404, "项目不存在")
+            require_project_role(db, user, project_id, {"viewer", "editor", "owner", "admin"})
+            rows = db.execute(
+                """SELECT folders.id AS folder_id,folders.name AS folder_name,artboards.id,artboards.name,artboards.sketch_id,
+                          versions.source_package_id,packages.package_hash
+                   FROM folders JOIN artboards ON artboards.folder_id=folders.id
+                   JOIN artboard_versions versions ON versions.id=artboards.current_version_id
+                   LEFT JOIN source_packages packages ON packages.id=versions.source_package_id
+                   WHERE folders.project_id=? AND folders.deleted_at IS NULL AND artboards.deleted_at IS NULL
+                   ORDER BY folders.created_at,folders.id,artboards.updated_at,artboards.id""",
+                (project_id,),
+            ).fetchall()
+            grouped_by_id = {}
+            for row in rows:
+                grouped_by_id.setdefault(row["folder_id"], [row["folder_name"], []])[1].append(row)
+            grouped = [(name, items) for name, items in grouped_by_id.values()]
+            target = self._cached_collection_sketch(db, grouped, DATA_DIR / "project-exports" / project_id, "项目中没有可导出的设计稿", "以下旧设计稿需要重新上传后才能导出项目 Sketch")
+        safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in project["name"]) or "project"
         return self._send_file(target, safe_name + ".sketch")
 
     def _download_preview(self, user, version_id):
