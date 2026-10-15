@@ -306,6 +306,15 @@ dialog h2 { margin: 0; font-size: 17px; }
 .design-nav { min-width: 0; overflow: auto; border-right: 1px solid var(--line); background: white; transition: transform .22s ease, opacity .18s ease; }
 .design-nav-heading { position: sticky; top: 0; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; height: 48px; padding: 0 10px 0 14px; border-bottom: 1px solid var(--line); background: white; z-index: 2; }
 .design-nav-heading span { color: var(--muted); font-size: 11px; }
+.design-nav-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 10px; padding: 3px; border-radius: 8px; background: #f2f4f8; }
+.design-nav-tabs button { min-height: 30px; padding: 4px 8px; border: 0; background: transparent; color: var(--muted); }
+.design-nav-tabs button.active { background: white; color: #2447cf; box-shadow: 0 1px 4px #17234414; }
+.viewer-layer-list { padding: 2px 8px 12px; }
+.viewer-layer-row { width: 100%; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; min-height: 30px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: 12px; }
+.viewer-layer-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-layer-row small { color: var(--muted); font-size: 9px; }
+.viewer-layer-row:hover { background: var(--accent-soft); color: #2447cf; }
+.viewer-layer-row.hidden-layer { opacity: .45; }
 .design-list { padding: 8px; }
 .design-row { width: 100%; display: grid; grid-template-columns: 42px 1fr; gap: 10px; align-items: center; min-height: 58px; padding: 7px 8px; border: 0; border-radius: 7px; background: transparent; text-align: left; }
 .design-row:hover, .design-row.active { background: #eef0f4; }

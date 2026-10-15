@@ -111,12 +111,13 @@
           <button id="viewer-fit" class="icon-button" title="适应窗口（0）" aria-label="适应窗口" data-icon="fit"></button>
           <button id="copy-screen-prompt" class="ghost" title="复制界面提示词" data-icon="copy" data-label="界面提示词"></button>
           <button id="copy-ai-link" class="ghost" title="复制不含密钥的 AI 链接" data-icon="link" data-label="AI 链接"></button>
-          <select id="version-select" aria-label="选择历史版本"></select>
+          <button id="download-source" class="ghost hidden" data-icon="download" data-label="源稿"></button>
+          <select id="version-select" class="hidden" aria-label="当前版本"></select>
           <button id="delete-artboard" class="danger ghost hidden" data-icon="trash" data-label="删除"></button>
           <button id="help-button" class="icon-button" title="接入与使用指南（新标签页）" aria-label="接入与使用指南" data-icon="help"></button>
         </div>
         <div class="workbench">
-          <aside id="viewer-sidebar" class="design-nav"><div class="design-nav-heading"><strong>项目目录</strong><span id="viewer-board-count"></span><button id="viewer-sidebar-close" class="sidebar-collapse" title="收起目录" aria-label="收起目录" data-icon="chevron-left"></button></div><label class="search-field panel-search"><span data-icon="search"></span><input id="viewer-search" type="search" placeholder="查找设计稿" aria-label="查找设计稿"></label><div id="viewer-folder-list" class="group-list viewer-folder-list"></div></aside>
+          <aside id="viewer-sidebar" class="design-nav"><div class="design-nav-heading"><strong id="viewer-nav-title">项目目录</strong><span id="viewer-board-count"></span><button id="viewer-sidebar-close" class="sidebar-collapse" title="收起目录" aria-label="收起目录" data-icon="chevron-left"></button></div><div class="design-nav-tabs"><button id="viewer-directory-tab" class="active">目录</button><button id="viewer-layer-tab">图层</button></div><div id="viewer-directory-panel"><label class="search-field panel-search"><span data-icon="search"></span><input id="viewer-search" type="search" placeholder="查找设计稿" aria-label="查找设计稿"></label><div id="viewer-folder-list" class="group-list viewer-folder-list"></div></div><div id="viewer-layer-list" class="viewer-layer-list hidden"></div></aside>
           <button id="viewer-sidebar-open" class="viewer-sidebar-open hidden" title="展开目录" aria-label="展开目录" data-icon="chevron-right"></button>
           <div id="canvas-scroll" class="canvas-scroll" tabindex="0" aria-label="设计稿画布，Option或Alt加点击选择父层，图层按钮上Alt加回车选择父层，空格拖动，0适应窗口"><div id="canvas-stage" class="canvas-stage"><img id="artboard-preview" alt="设计稿预览"><div id="layer-overlay" class="layer-overlay"></div><div id="measurement-overlay" class="measurement-overlay"></div></div><div id="viewer-empty" class="viewer-tip">点击选子层 <span>·</span> Option/Alt + 点击选父层 <span>·</span> 空格拖动 <span>·</span> 0 适应窗口</div></div>
           <aside class="inspector-panel">

@@ -275,6 +275,17 @@ async function openArtboard(artboardId, push = true) {
 function renderDesignList() {
   $("#viewer-board-count").textContent = state.artboards.length; renderFolderTree("#viewer-folder-list", "viewer");
 }
+function showViewerNav(mode) {
+  const layers = mode === "layers";
+  $("#viewer-directory-tab").classList.toggle("active", !layers); $("#viewer-layer-tab").classList.toggle("active", layers);
+  $("#viewer-directory-panel").classList.toggle("hidden", layers); $("#viewer-layer-list").classList.toggle("hidden", !layers);
+  $("#viewer-nav-title").textContent = layers ? "图层" : "项目目录"; $("#viewer-board-count").textContent = layers ? (state.version?.design_context?.layers?.length || 0) : state.artboards.length;
+}
+function renderFullLayerTree() {
+  const layers = state.version?.design_context?.layers || [];
+  $("#viewer-layer-list").innerHTML = layers.map((layer) => `<button class="viewer-layer-row${layer.visible ? "" : " hidden-layer"}" data-context-layer="${escapeHtml(layer.id)}" style="padding-left:${10 + Math.min(Number(layer.depth || 0), 12) * 14}px" title="${escapeHtml(layer.path?.join(" › ") || layer.name)}"><span>${escapeHtml(layer.name || layer.type)}</span><small>${escapeHtml(layer.type || "")}</small></button>`).join("") || '<p class="muted tree-empty">旧版设计稿没有完整图层数据，重新上传后补齐。</p>';
+  $$('[data-context-layer]').forEach((button) => button.addEventListener('click', () => { const item=state.layerRects.get(button.dataset.contextLayer); if(item) selectLayer(item.key,true,false); }));
+}
 async function loadVersion(versionId) {
   const epoch = ++state.versionEpoch; const artboard = state.artboard; const done = beginLoading("正在读取设计标注…");
   state.version = null; $("#copy-screen-prompt").disabled = true;
@@ -284,6 +295,7 @@ async function loadVersion(versionId) {
     // 先完成解码再展示新画板，快速切版本时旧请求不能覆盖新图或标注。
     const image = new Image(); image.src = version.version.preview_url; await image.decode(); if (epoch !== state.versionEpoch) return;
     state.version = version; state.layerRects = new Map(); $("#viewer-version-label").textContent = `版本 ${version.version.version_no} / ${displayNumber(artboard.width, "")} × ${displayNumber(artboard.height, "")} pt`;
+    $("#download-source").classList.toggle("hidden", !version.version.source_package_id); renderFullLayerTree(); showViewerNav($("#viewer-layer-tab").classList.contains("active") ? "layers" : "directory");
     $("#properties-panel").innerHTML = ""; $("#version-select").value = versionId;
     const preview = $("#artboard-preview"); preview.src = image.src; preview.alt = `${artboard.name}，版本 ${version.version.version_no}`;
     const width = Number(artboard.width) || image.naturalWidth; const height = Number(artboard.height) || image.naturalHeight;
@@ -714,6 +726,8 @@ $("#delete-project-button").addEventListener("click", () => run(deleteCurrentPro
 $("#audit-button").addEventListener("click", () => run(() => openAudit(null,'')));
 for (const [selector, action] of [["#snapshot-jobs-button", openSnapshotJobs], ["#new-project-button", createProject], ["#new-folder-button", createFolder], ["#users-button", openUsers], ["#api-keys-button", () => openApiKeys()], ["#members-button", openMembers], ["#recycle-button", openRecycle], ["#copy-screen-prompt", copyScreenPrompt], ["#copy-ai-link", copyAiLink], ["#delete-artboard", deleteCurrentArtboard]]) $(selector).addEventListener("click", () => run(action));
 $("#back-to-stage").addEventListener("click", () => run(() => openProject(state.project.id))); $("#version-select").addEventListener("change", (event) => run(() => loadVersion(event.target.value))); $("#zoom-range").addEventListener("input", (event) => setZoom(event.target.value));
+$("#viewer-directory-tab").addEventListener("click",()=>showViewerNav("directory")); $("#viewer-layer-tab").addEventListener("click",()=>showViewerNav("layers"));
+$("#download-source").addEventListener("click",()=>{ if(state.artboard) triggerDownload(`/api/artboards/${state.artboard.id}/source`,`${state.artboard.name}.sketch`); });
 $("#stage-fit").addEventListener("click", fitStage); $("#stage-minus").addEventListener("click", () => setStageZoom(state.stageZoom / 1.15)); $("#stage-plus").addEventListener("click", () => setStageZoom(state.stageZoom * 1.15));
 $("#stage-sidebar-close").addEventListener("click", () => setSidebarCollapsed("stage", true)); $("#stage-sidebar-open").addEventListener("click", () => setSidebarCollapsed("stage", false));
 $("#viewer-sidebar-close").addEventListener("click", () => setSidebarCollapsed("viewer", true)); $("#viewer-sidebar-open").addEventListener("click", () => setSidebarCollapsed("viewer", false));
