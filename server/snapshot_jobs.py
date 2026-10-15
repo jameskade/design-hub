@@ -359,6 +359,10 @@ class SnapshotJobs:
             return self.public(job)
 
     def command(self, job, args):
+        with self.app.SKETCH_RENDER_LOCK:
+            return self._command(job, args)
+
+    def _command(self, job, args):
         self.check(job)
         # 每次只持有本任务自己的进程组；取消不操作其他 Sketch/用户任务。
         log = (self.root / job["id"] / "work" / "renderer.log").open("wb")
