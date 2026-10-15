@@ -100,7 +100,7 @@ def main():
             manager.render=held;started.clear();release.clear()
             e=create();receive(e);assert started.wait(2);manager.cancel(e);release.set();wait(e)
             assert e['state']=='cancelled'
-            with app.db_connection() as db:assert db.execute('SELECT count(*) FROM artboard_versions').fetchone()[0]==2
+            with app.db_connection() as db:assert db.execute('SELECT count(*) FROM artboard_versions').fetchone()[0]==1
             print('PASS: 渲染中取消不发布、不改变已有版本')
             incomplete=create();incomplete['updated']=time.time()-4000
             manager.cancel(incomplete);wait(incomplete)

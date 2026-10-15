@@ -405,6 +405,40 @@ def audit(db, actor_id, action, object_type, object_id=None, details=None):
     )
 
 
+def prune_superseded_versions(db, artboard_ids):
+    """先删数据库引用，文件在事务提交后清理；失败最多遗留可回收文件。"""
+    artboard_ids = list(dict.fromkeys(artboard_ids))
+    if not artboard_ids:
+        return []
+    placeholders = ",".join("?" for _ in artboard_ids)
+    rows = db.execute(
+        f"""SELECT version.id, version.metadata_path, version.source_package_id
+            FROM artboard_versions version JOIN artboards artboard ON artboard.id=version.artboard_id
+            WHERE version.artboard_id IN ({placeholders}) AND version.id<>artboard.current_version_id""",
+        artboard_ids,
+    ).fetchall()
+    if not rows:
+        return []
+    version_ids = [row["id"] for row in rows]
+    version_placeholders = ",".join("?" for _ in version_ids)
+    db.execute(f"DELETE FROM artboard_versions WHERE id IN ({version_placeholders})", version_ids)
+    package_ids = [row["source_package_id"] for row in rows if row["source_package_id"]]
+    for package_id in set(package_ids):
+        if not db.execute("SELECT 1 FROM artboard_versions WHERE source_package_id=?", (package_id,)).fetchone():
+            db.execute("DELETE FROM source_packages WHERE id=?", (package_id,))
+    return [str(Path(row["metadata_path"]).parent) for row in rows]
+
+
+def cleanup_version_paths(paths):
+    for name in paths:
+        path = Path(name).resolve()
+        try:
+            if PROJECT_DATA_DIR in path.parents and re.fullmatch(r"[0-9a-f-]{36}", path.name) and path.is_dir():
+                shutil.rmtree(path)
+        except OSError as error:
+            print("[Storage]:[VersionCleanup] 清理失败", path.name, type(error).__name__, flush=True)
+
+
 def key_cipher(db):
     path = DATA_DIR / '.key-encryption.key'
     if not path.exists():
