@@ -81,6 +81,11 @@ def main():
             assert len(rebuilt_document["pages"]) == 2
             assert [layer["do_objectID"] for layer in page["layers"]] == ["BOARD-A"]
             assert archive.read("images/shared.png") == b"shared-image-bytes"
+        with app.db_connection() as db:
+            garbage=packages.collect_garbage(db,0)
+            assert db.execute("SELECT count(*) FROM source_packages").fetchone()[0]==0
+            assert db.execute("SELECT count(*) FROM source_blobs").fetchone()[0]==0
+        assert garbage
         print("PASS: 一稿一源、传递依赖、共享 Blob 去重、标准 Sketch 重建、版本化图层解析")
 
 

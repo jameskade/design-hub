@@ -7,6 +7,7 @@ import tempfile
 import uuid
 import zipfile
 import zlib
+from datetime import datetime, timedelta, timezone
 
 
 def canonical_json(value):
@@ -198,3 +199,23 @@ class SourcePackages:
                 raise ValueError("共享源稿资源校验失败")
             result[logical_path] = raw
         return result
+
+    def collect_garbage(self, db, grace_seconds=86400):
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)).isoformat(timespec="seconds")
+        packages = [row[0] for row in db.execute(
+            """SELECT package.id FROM source_packages package
+               WHERE package.created_at<=? AND NOT EXISTS(
+                   SELECT 1 FROM artboard_versions version WHERE version.source_package_id=package.id
+               )""", (cutoff,)
+        ).fetchall()]
+        for package_id in packages:
+            db.execute("DELETE FROM source_packages WHERE id=?", (package_id,))
+        blobs = db.execute(
+            """SELECT blob.sha256,blob.file_path FROM source_blobs blob
+               WHERE blob.created_at<=? AND NOT EXISTS(
+                   SELECT 1 FROM source_package_entries entry WHERE entry.blob_sha256=blob.sha256
+               )""", (cutoff,)
+        ).fetchall()
+        for digest, _ in blobs:
+            db.execute("DELETE FROM source_blobs WHERE sha256=?", (digest,))
+        return [Path(path) for _, path in blobs]

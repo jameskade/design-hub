@@ -118,6 +118,7 @@ class SnapshotJobs:
         self.lock = threading.RLock()
         self.jobs = {}
         self.space_checks = {}
+        self.last_gc = 0
         self.pending = queue.Queue()
         self.stopping = threading.Event()
         self.validation = threading.Semaphore(1)
@@ -528,6 +529,12 @@ class SnapshotJobs:
                                 self.space_checks.pop(job["id"], None)
                                 with self.app.db_connection() as db:
                                     db.execute("DELETE FROM snapshot_commits WHERE id=?", (job["id"],))
+                    if time.time() - self.last_gc > 3600:
+                        with self.app.WRITE_LOCK, self.app.db_connection() as db:
+                            garbage = self.sources.collect_garbage(db)
+                        for path in garbage:
+                            path.unlink(missing_ok=True)
+                        self.last_gc = time.time()
                 continue
             if key is None:
                 self.pending.task_done()
