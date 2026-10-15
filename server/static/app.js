@@ -181,7 +181,8 @@ async function openProject(projectId, push = true) {
 }
 function boardsInView() { return state.folderId ? state.artboards.filter((board) => board.folder_id === state.folderId) : state.artboards; }
 function renderGroups() {
-  $("#stage-group-title").textContent = "全部"; $("#stage-count").textContent = state.artboards.length; renderFolderTree("#folder-list", "stage");
+  const folder=state.folders.find(item=>item.id===state.stageSelectedFolderId); const count=folder?state.artboards.filter(board=>board.folder_id===folder.id).length:state.artboards.length;
+  $("#stage-group-title").textContent = folder?.name || "全部"; $("#stage-count").textContent = count; $("#download-folder-sketch").classList.toggle("hidden",!folder); renderFolderTree("#folder-list", "stage");
 }
 function renderFolderTree(selector, mode) {
   const target = $(selector); const query = $(`#${mode}-search`).value.trim().toLocaleLowerCase();
@@ -621,7 +622,7 @@ async function copyAiLink() {
 }
 
 async function createProject() { const values = await promptDialog("新建项目", [{ name: "name", label: "项目名称", required: true }, { name: "description", label: "说明" }]); if (!values) return; const result = await api("/api/projects", { method: "POST", body: values }); toast("项目已创建"); await loadProjects(); await openProject(result.id); }
-async function createFolder() { const values = await promptDialog("新建分组", [{ name: "name", label: "分组名称", required: true }]); if (!values) return; await api(`/api/projects/${state.project.id}/folders`, { method: "POST", body: values }); toast("分组已创建"); await openProject(state.project.id, false); }
+async function createFolder() { const values = await promptDialog("新建目录", [{ name: "name", label: "目录名称", required: true }]); if (!values) return; await api(`/api/projects/${state.project.id}/folders`, { method: "POST", body: values }); toast("目录已创建"); await openProject(state.project.id, false); }
 async function openSnapshotJobs() {
   if (!state.project) return;
   const projectId = state.project.id; const dialog = $("#snapshot-jobs-dialog");
@@ -728,6 +729,7 @@ for (const [selector, action] of [["#snapshot-jobs-button", openSnapshotJobs], [
 $("#back-to-stage").addEventListener("click", () => run(() => openProject(state.project.id))); $("#version-select").addEventListener("change", (event) => run(() => loadVersion(event.target.value))); $("#zoom-range").addEventListener("input", (event) => setZoom(event.target.value));
 $("#viewer-directory-tab").addEventListener("click",()=>showViewerNav("directory")); $("#viewer-layer-tab").addEventListener("click",()=>showViewerNav("layers"));
 $("#download-source").addEventListener("click",()=>{ if(state.artboard) triggerDownload(`/api/artboards/${state.artboard.id}/source`,`${state.artboard.name}.sketch`); });
+$("#download-folder-sketch").addEventListener("click",()=>{ const folder=state.folders.find(item=>item.id===state.stageSelectedFolderId); if(folder) triggerDownload(`/api/folders/${folder.id}/sketch`,`${folder.name}.sketch`); });
 $("#stage-fit").addEventListener("click", fitStage); $("#stage-minus").addEventListener("click", () => setStageZoom(state.stageZoom / 1.15)); $("#stage-plus").addEventListener("click", () => setStageZoom(state.stageZoom * 1.15));
 $("#stage-sidebar-close").addEventListener("click", () => setSidebarCollapsed("stage", true)); $("#stage-sidebar-open").addEventListener("click", () => setSidebarCollapsed("stage", false));
 $("#viewer-sidebar-close").addEventListener("click", () => setSidebarCollapsed("viewer", true)); $("#viewer-sidebar-open").addEventListener("click", () => setSidebarCollapsed("viewer", false));

@@ -24,6 +24,7 @@ def main():
         app.ensure_initial_admin()
         from source_packages import SourcePackages, split_design
         from sketch_parser import parse_design
+        from directory_sketch import build_directory
 
         document = {
             "pages": [{"_ref": "pages/main"}, {"_ref": "pages/symbols"}],
@@ -49,6 +50,16 @@ def main():
         assert context["root_layer_id"] == "BOARD-A"
         assert [layer["id"] for layer in context["layers"]] == ["BOARD-A", "BOARD-A-I"]
         assert context["layers"][1]["parent_id"] == "BOARD-A"
+        directory_sketch,_=build_directory([("BOARD-A",first),("BOARD-B",second)],"测试目录")
+        with zipfile.ZipFile(io.BytesIO(directory_sketch)) as directory_archive:
+            metadata=json.loads(directory_archive.read("meta.json"))
+            assert set(next(iter(metadata["pagesAndArtboards"].values()))["artboards"])=={"BOARD-A","BOARD-B"}
+        conflicting=dict(second);conflicting["images/shared.png"]=b"different"
+        try:
+            build_directory([("BOARD-A",first),("BOARD-B",conflicting)],"冲突目录")
+            raise AssertionError("同路径不同依赖未拒绝")
+        except ValueError:
+            pass
         with app.db_connection() as db:
             user_id = db.execute("SELECT id FROM users WHERE username_norm='admin'").fetchone()[0]
             first_id, first_hash = packages.store(db, first, "BOARD-A", "2025.3.4", user_id, app.utc_now())

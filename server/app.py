@@ -46,6 +46,7 @@ PLUGIN_TOKEN_DAYS = 30
 PASSWORD_ITERATIONS = 310_000
 WRITE_LOCK = threading.RLock()
 SNAPSHOT_LOCK = threading.Lock()
+SKETCH_RENDER_LOCK = threading.Lock()
 SNAPSHOT_MANAGER = None
 
 
@@ -646,7 +647,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             return
         parts = path.strip('/').split('/')
         # 不记录 body、查询参数、Authorization、Key 原文；未知路径片段不写入日志。
-        route_words = {'api','projects','folders','artboards','versions','assets','uploads','upload','chunk','commit','cancel','members','users','api-keys','login','plugin','logout','register','restore','purge','preview','download','export','exports','package','source','ai-context','recycle'}
+        route_words = {'api','projects','folders','artboards','versions','assets','uploads','upload','chunk','commit','cancel','members','users','api-keys','login','plugin','logout','register','restore','purge','preview','download','export','exports','package','source','sketch','ai-context','recycle'}
         safe_path = '/' + '/'.join(p if p in route_words or re.fullmatch(r'[0-9a-f-]{36}',p) else '[invalid]' for p in parts)
         try:
             with WRITE_LOCK, db_connection() as db:
@@ -965,6 +966,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 return self._artboard_detail(user, parts[2])
             if method == "DELETE":
                 return self._delete_artboard(user, parts[2])
+        if len(parts) == 4 and parts[:2] == ["api", "folders"] and parts[3] == "sketch" and method == "GET":
+            return self._download_folder_sketch(user, parts[2])
         if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "ai-context" and method == "GET":
             return self._artboard_ai_context(user, parts[2], query)
         if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "source" and method == "GET":
@@ -1693,6 +1696,58 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             body = SourcePackages(DATA_DIR / "source-blobs").bytes(db, row["source_package_id"])
         safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in row["name"]) or "design"
         return self._download_bytes(body, safe_name + ".sketch")
+
+    def _download_folder_sketch(self, user, folder_id):
+        with db_connection() as db:
+            folder = db.execute("SELECT id,project_id,name FROM folders WHERE id=? AND deleted_at IS NULL", (folder_id,)).fetchone()
+            if not folder:
+                raise ApiError(404, "目录不存在")
+            require_project_role(db, user, folder["project_id"], {"viewer", "editor", "owner", "admin"})
+            rows = db.execute(
+                """SELECT artboards.id,artboards.name,artboards.sketch_id,versions.source_package_id,packages.package_hash
+                   FROM artboards JOIN artboard_versions versions ON versions.id=artboards.current_version_id
+                   LEFT JOIN source_packages packages ON packages.id=versions.source_package_id
+                   WHERE artboards.folder_id=? AND artboards.deleted_at IS NULL ORDER BY artboards.updated_at,artboards.id""",
+                (folder_id,),
+            ).fetchall()
+            if not rows:
+                raise ApiError(409, "目录中没有可导出的设计稿")
+            missing = [row["name"] for row in rows if not row["source_package_id"]]
+            if missing:
+                raise ApiError(409, "以下旧设计稿需要重新上传后才能导出目录 Sketch：" + "、".join(missing[:8]) + (" 等" if len(missing) > 8 else ""))
+            state_hash = hashlib.sha256(canonical_json([(row["id"], row["source_package_id"], row["package_hash"]) for row in rows]).encode()).hexdigest()
+            cache = DATA_DIR / "directory-exports" / folder_id
+            target = cache / (state_hash + ".sketch")
+            if not target.is_file():
+                try:
+                    from .source_packages import SourcePackages
+                    from .directory_sketch import build_directory
+                except ImportError:
+                    from source_packages import SourcePackages
+                    from directory_sketch import build_directory
+                sources = SourcePackages(DATA_DIR / "source-blobs")
+                packages = [(row["sketch_id"], sources.files(db, row["source_package_id"])) for row in rows]
+                body, _ = build_directory(packages, folder["name"])
+                cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+                temporary = cache / (state_hash + ".tmp")
+                temporary.write_bytes(body); os.chmod(temporary, 0o600)
+                tool = os.environ.get("DESIGN_HUB_SKETCHTOOL", "/Applications/Sketch.app/Contents/MacOS/sketchtool")
+                # 目录合成与上传渲染共用单槽；三项验证全部通过才原子发布缓存。
+                with SKETCH_RENDER_LOCK, tempfile.TemporaryDirectory(prefix="design-hub-directory-check-") as output:
+                    metadata = subprocess.run([tool, "metadata", str(temporary), "--json"], capture_output=True, text=True, timeout=120)
+                    duplicates = subprocess.run([tool, "duplicates", str(temporary)], capture_output=True, text=True, timeout=120)
+                    rendered = subprocess.run([tool, "export", "artboards", str(temporary), "--output=" + output, "--formats=png", "--scales=1", "--use-id-for-name", "--serial"], capture_output=True, text=True, timeout=300)
+                    actual = {path.stem for path in Path(output).glob("*.png")}
+                    expected = {row["sketch_id"] for row in rows}
+                    if metadata.returncode or duplicates.returncode or "No duplicates found" not in duplicates.stdout + duplicates.stderr or rendered.returncode or actual != expected:
+                        temporary.unlink(missing_ok=True)
+                        raise ApiError(500, "目录 Sketch 生成校验失败，未提供损坏文件")
+                os.replace(temporary, target)
+                for stale in cache.glob("*.sketch"):
+                    if stale != target:
+                        stale.unlink(missing_ok=True)
+        safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in folder["name"]) or "directory"
+        return self._send_file(target, safe_name + ".sketch")
 
     def _download_preview(self, user, version_id):
         with db_connection() as db:

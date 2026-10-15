@@ -174,6 +174,14 @@ class SourcePackages:
         return package_id, package_hash
 
     def bytes(self, db, package_id):
+        files = self.files(db, package_id)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            for logical_path, raw in sorted(files.items()):
+                archive.writestr(logical_path, raw)
+        return output.getvalue()
+
+    def files(self, db, package_id):
         rows = db.execute(
             """SELECT entry.logical_path, blob.sha256, blob.file_path
                FROM source_package_entries entry
@@ -183,11 +191,10 @@ class SourcePackages:
         ).fetchall()
         if not rows:
             raise ValueError("源稿包不存在")
-        output = io.BytesIO()
-        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-            for logical_path, digest, file_path in rows:
-                raw = zlib.decompress(Path(file_path).read_bytes())
-                if hashlib.sha256(raw).hexdigest() != digest:
-                    raise ValueError("共享源稿资源校验失败")
-                archive.writestr(logical_path, raw)
-        return output.getvalue()
+        result = {}
+        for logical_path, digest, file_path in rows:
+            raw = zlib.decompress(Path(file_path).read_bytes())
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError("共享源稿资源校验失败")
+            result[logical_path] = raw
+        return result
