@@ -5,6 +5,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../sketch-p
 const snapshotSource = fs.readFileSync(require('node:path').join(__dirname, '../sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/snapshot.js'), 'utf8');
 assert(!source.includes('require("./local-upload")'),'新插件不得再进入本地资源处理');
 assert(snapshotSource.includes('uploadChunks') && snapshotSource.includes('/chunk'),'新插件必须使用分块源稿上传');
+assert(snapshotSource.includes('counts[item.status]') && snapshotSource.includes('未变化 '),'完成提示必须区分新增、更新和未变化');
 const projectId = '11111111-1111-1111-1111-111111111111';
 const folderId = '22222222-2222-2222-2222-222222222222';
 function run(valid, confirmed = true) {

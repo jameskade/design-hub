@@ -164,7 +164,11 @@ module.exports = function uploadSnapshot(options, completion) {
     if (cancelled) return cancelRemote();
     request("GET", base + "/" + job.id, null, null, (result) => {
       progress((result.phase || result.state) + " · " + (result.done || 0) + "/" + (result.total || 0) + "\n任务 " + job.id);
-      if (result.state === "complete") return finish("服务端处理完成，已发布 " + result.results.length + " 个画板；任务快照将自动清理。");
+      if (result.state === "complete") {
+        const counts = {created: 0, updated: 0, unchanged: 0};
+        result.results.forEach((item) => { if (counts[item.status] !== undefined) counts[item.status] += 1; });
+        return finish("服务端处理完成 · 新增 " + counts.created + " · 更新 " + counts.updated + " · 未变化 " + counts.unchanged + "；任务快照已清理。");
+      }
       if (["failed", "cancelled"].includes(result.state)) return finish(result.error || "任务已取消");
       timers.setTimeout(pollJob, 1500);
     });

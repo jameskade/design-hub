@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import tempfile
 import uuid
 import zipfile
@@ -199,6 +200,27 @@ class SourcePackages:
                 raise ValueError("共享源稿资源校验失败")
             result[logical_path] = raw
         return result
+
+    def discard(self, db, package_id):
+        """删除本次未采用的源稿包，并返回已无引用的 Blob 文件。"""
+        blobs = db.execute(
+            """SELECT blob.sha256,blob.file_path FROM source_package_entries entry
+               JOIN source_blobs blob ON blob.sha256=entry.blob_sha256
+               WHERE entry.package_id=? AND NOT EXISTS(
+                   SELECT 1 FROM source_package_entries other
+                   WHERE other.blob_sha256=entry.blob_sha256 AND other.package_id<>entry.package_id
+               )""", (package_id,)
+        ).fetchall()
+        db.execute("DELETE FROM source_packages WHERE id=?", (package_id,))
+        db.executemany("DELETE FROM source_blobs WHERE sha256=?", ((digest,) for digest, _ in blobs))
+        return [Path(path) for _, path in blobs]
+
+    def cleanup(self, paths):
+        root = self.root.resolve()
+        for path in paths:
+            target = Path(path).resolve()
+            if root in target.parents and re.fullmatch(r"[0-9a-f]{64}\.zlib", target.name):
+                target.unlink(missing_ok=True)
 
     def collect_garbage(self, db, grace_seconds=86400):
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)).isoformat(timespec="seconds")

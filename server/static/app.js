@@ -287,6 +287,16 @@ function renderFullLayerTree() {
   $("#viewer-layer-list").innerHTML = layers.map((layer) => `<button class="viewer-layer-row${layer.visible ? "" : " hidden-layer"}" data-context-layer="${escapeHtml(layer.id)}" style="padding-left:${10 + Math.min(Number(layer.depth || 0), 12) * 14}px" title="${escapeHtml(layer.path?.join(" › ") || layer.name)}"><span>${escapeHtml(layer.name || layer.type)}</span><small>${escapeHtml(layer.type || "")}</small></button>`).join("") || '<p class="muted tree-empty">旧版设计稿没有完整图层数据，重新上传后补齐。</p>';
   $$('[data-context-layer]').forEach((button) => button.addEventListener('click', () => { const item=state.layerRects.get(button.dataset.contextLayer); if(item) selectLayer(item.key,true,false); }));
 }
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`图片加载失败：${url}`));
+    image.src = url;
+    // Chrome 对部分已缓存的旧预览不会结束 decode()，直接使用已完成的图片。
+    if (image.complete) image.naturalWidth ? resolve(image) : reject(new Error(`图片加载失败：${url}`));
+  });
+}
 async function loadVersion(versionId) {
   const epoch = ++state.versionEpoch; const artboard = state.artboard; const done = beginLoading("正在读取设计标注…");
   state.version = null; $("#copy-screen-prompt").disabled = true;
@@ -294,7 +304,7 @@ async function loadVersion(versionId) {
   try {
     const version = await api(`/api/versions/${versionId}`); if (epoch !== state.versionEpoch) return;
     // 先完成解码再展示新画板，快速切版本时旧请求不能覆盖新图或标注。
-    const image = new Image(); image.src = version.version.preview_url; await image.decode(); if (epoch !== state.versionEpoch) return;
+    const image = await loadImage(version.version.preview_url); if (epoch !== state.versionEpoch) return;
     state.version = version; state.layerRects = new Map(); $("#viewer-version-label").textContent = `版本 ${version.version.version_no} / ${displayNumber(artboard.width, "")} × ${displayNumber(artboard.height, "")} pt`;
     $("#download-source").classList.toggle("hidden", !version.version.source_package_id); renderFullLayerTree(); showViewerNav($("#viewer-layer-tab").classList.contains("active") ? "layers" : "directory");
     $("#properties-panel").innerHTML = ""; $("#version-select").value = versionId;
@@ -534,7 +544,7 @@ function bindExportControls(item, exportSettings = null) {
 }
 function triggerDownload(url, filename) { const link = document.createElement("a"); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove(); }
 function assetFilename(name, format, scale, platform) { const clean = String(name || "asset").replace(/[\\/:*?"<>|]/g, "-"); if (platform === "android") return `${clean}-${({1:"mdpi",2:"xhdpi",3:"xxhdpi"})[scale]}.${format}`; if (platform === "flutter") return `${scale}.0x-${clean}.${format}`; return `${clean}${scale === 1 ? "" : `@${scale}x`}.${format}`; }
-async function loadAssetImage(item, scale, includeShadows = true) { const asset = exportAssetsForItem(item, includeShadows).find((candidate) => candidate.format === "png" && Number(candidate.scale) === scale); if (!asset) throw new Error(`缺少 ${item.layer.name} @${scale}x`); const image = new Image(); image.src = asset.download_url; await image.decode(); return image; }
+async function loadAssetImage(item, scale, includeShadows = true) { const asset = exportAssetsForItem(item, includeShadows).find((candidate) => candidate.format === "png" && Number(candidate.scale) === scale); if (!asset) throw new Error(`缺少 ${item.layer.name} @${scale}x`); return loadImage(asset.download_url); }
 async function renderComposite(scope, scale, format, targetCanvas = null, includeShadows = true) { const bounds = scopeBounds(scope, includeShadows); const canvas = targetCanvas || document.createElement("canvas"); canvas.width = Math.max(1, Math.round(bounds.width * scale)); canvas.height = Math.max(1, Math.round(bounds.height * scale)); const context = canvas.getContext("2d"); if (format === "jpg") { context.fillStyle = "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height); } for (const item of scope.members) { const image = await loadAssetImage(item, scale, includeShadows); const box = includeShadows ? renderedBounds(item) : itemFrame(item); context.drawImage(image, Math.round((box.x - bounds.x) * scale), Math.round((box.y - bounds.y) * scale), Math.round(box.width * scale), Math.round(box.height * scale)); } return canvas; }
 function blobBase64(blob) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(blob); }); }
 async function exportSelectedAssets(scope) {

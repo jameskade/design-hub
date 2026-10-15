@@ -85,7 +85,7 @@ generated = False
 if not values.get("DESIGN_HUB_ADMIN_PASSWORD"):
     values["DESIGN_HUB_ADMIN_PASSWORD"] = secrets.token_urlsafe(18)
     generated = True
-ordered = ["DESIGN_HUB_HOST", "DESIGN_HUB_PORT", "DESIGN_HUB_ADMIN_USERNAME", "DESIGN_HUB_ADMIN_PASSWORD", "DESIGN_HUB_MAX_UPLOAD_MB"]
+ordered = ["DESIGN_HUB_HOST", "DESIGN_HUB_PORT", "DESIGN_HUB_ADMIN_USERNAME", "DESIGN_HUB_ADMIN_PASSWORD", "DESIGN_HUB_MAX_UPLOAD_MB", "DESIGN_HUB_SNAPSHOT_ENABLED", "DESIGN_HUB_SKETCHTOOL"]
 target.write_text("\n".join(f"{key}={values.get(key, '')}" for key in ordered) + "\n", encoding="utf-8")
 print("generated" if generated else "ready")
 PY

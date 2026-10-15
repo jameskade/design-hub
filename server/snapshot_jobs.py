@@ -478,6 +478,7 @@ class SnapshotJobs:
     def publish(self, job, rendered):
         app = self.app
         obsolete_paths = []
+        obsolete_blobs = []
         # 取消和发布共用短临界区；整个任务同一事务，冲突/权限变化时不发布部分画板。
         with self.lock, app.WRITE_LOCK, app.db_connection() as db:
             self.check(job)
@@ -502,8 +503,11 @@ class SnapshotJobs:
                 def source():
                     for asset, path in assets:
                         yield asset, path.read_bytes()
-                results.append(app.DesignHubHandler._store_artboard(None, db, user, job["project_id"], job["folder_id"], board, source, track))
-            obsolete_paths = app.prune_superseded_versions(db, [result["artboard_id"] for result in results])
+                result = app.DesignHubHandler._store_artboard(None, db, user, job["project_id"], job["folder_id"], board, source, track)
+                if result["status"] == "unchanged" and result.get("source_package_id") != package_id:
+                    obsolete_blobs.extend(self.sources.discard(db, package_id))
+                results.append(result)
+            obsolete_paths.extend(app.prune_superseded_versions(db, [result["artboard_id"] for result in results]))
             db.execute("INSERT INTO snapshot_commits VALUES (?, ?, ?)", (job["id"], json.dumps(results), time.time()))
             now = app.utc_now()
             db.execute("UPDATE folders SET updated_at=? WHERE id=?", (now, job["folder_id"]))
@@ -511,6 +515,7 @@ class SnapshotJobs:
             db.commit()
             self.update(job, state="complete", phase="已完成", results=results)
         app.cleanup_version_paths(obsolete_paths)
+        self.sources.cleanup(obsolete_blobs)
 
     def worker(self):
         while not self.stopping.is_set():

@@ -92,6 +92,23 @@ def main():
             manager.cancel(b); assert b['state']=='cancelled' and not a.get('cancel_requested')
             release.set();wait(a);wait(b);assert a['state']=='complete',a
             print('PASS: 两人独立任务、越权拒绝、排队取消不影响运行任务、成功及取消清理')
+            # Sketch 每次另存快照会重写 document ID；画板内容未变时不得泄漏新源稿包或 Blob。
+            variant=dict(source_package)
+            variant_document=json.loads(variant['document.json'])
+            variant_document['do_objectID']='NEW-SNAPSHOT-DOCUMENT-ID'
+            variant['document.json']=json.dumps(variant_document).encode()
+            manager.render=lambda job:[({**board,"preview_base64":base64.b64encode(PNG).decode(),"design_context":design_context,"parser_version":PARSER_VERSION},[],variant,"2025.3.4")]
+            with app.db_connection() as db: before=(db.execute('SELECT count(*) FROM source_packages').fetchone()[0],db.execute('SELECT count(*) FROM source_blobs').fetchone()[0])
+            before_files=set((Path(temporary)/'source-blobs').rglob('*.zlib'))
+            same=create();receive(same);wait(same)
+            with app.db_connection() as db: after=(db.execute('SELECT count(*) FROM source_packages').fetchone()[0],db.execute('SELECT count(*) FROM source_blobs').fetchone()[0])
+            after_files=set((Path(temporary)/'source-blobs').rglob('*.zlib'))
+            deadline=time.monotonic()+2
+            while after_files!=before_files and time.monotonic()<deadline:
+                time.sleep(.01);after_files=set((Path(temporary)/'source-blobs').rglob('*.zlib'))
+            assert same['results'][0]['status']=='unchanged' and after==before and after_files==before_files,(same,before,after)
+            manager.render=held
+            print('PASS: 未变化画板不新增源稿包或 Blob')
             # 两任务以同一版本为基准，后完成者不能覆盖先发布者。
             started.clear();release.clear()
             c=create();d=create(second);receive(c);assert started.wait(2);receive(d)

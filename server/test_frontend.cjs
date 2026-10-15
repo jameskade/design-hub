@@ -66,6 +66,18 @@ for (const name of ["layerId", "layerChildren", "hasVisibleText", "isAtomicLayer
   vm.runInContext(declaration(name), context);
 }
 const evaluate = (expression) => vm.runInContext(expression, context);
+async function verifyCachedImageLoading() {
+  class CachedImage {
+    constructor() { this.complete = false; this.naturalWidth = 0; }
+    set src(value) { this.url = value; this.complete = true; this.naturalWidth = 780; }
+  }
+  const ctx = vm.createContext({ Image: CachedImage, Error, Promise });
+  vm.runInContext(declaration('loadImage'), ctx);
+  const image = await vm.runInContext('loadImage("/cached-preview.png")', ctx);
+  assert.equal(image.naturalWidth, 780, '已缓存图片不能等待永不结束的 decode()');
+  console.log('PASS: 已缓存旧预览可立即完成加载');
+}
+verifyCachedImageLoading().catch(error=>{console.error(error);process.exitCode=1;});
 {
   vm.runInContext(declaration('layerAncestors'), context);
   vm.runInContext(declaration('selectionTarget'), context);

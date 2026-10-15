@@ -1490,7 +1490,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                               canvas_x = ?, canvas_y = ?, deleted_at = NULL, updated_at = ? WHERE id = ?""",
                     (folder_id, name, float(board.get("width") or 0), float(board.get("height") or 0), float(board.get("canvas_x") or 0), float(board.get("canvas_y") or 0), utc_now(), existing["id"]),
                 )
-                return {"sketch_id": sketch_id, "name": name, "status": "unchanged", "artboard_id": existing["id"], "source_package_id": board.get("source_package_id") or current["source_package_id"]}
+                return {"sketch_id": sketch_id, "name": name, "status": "unchanged", "artboard_id": existing["id"], "source_package_id": current["source_package_id"] or board.get("source_package_id")}
 
         artboard_id = existing["id"] if existing else uuid4()
         version_id = uuid4()
