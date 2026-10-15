@@ -61,6 +61,8 @@ def main():
             def settimeout(self,value):pass
         def receive(job):
             return manager.receive(SimpleNamespace(headers={"Content-Length":str(len(raw))},connection=Connection(),rfile=io.BytesIO(raw)),job)
+        def chunk(job, offset, body):
+            return manager.receive_chunk(SimpleNamespace(headers={"Content-Length":str(len(body)),"X-Upload-Offset":str(offset)},rfile=io.BytesIO(body)),job)
         def wait(job):
             deadline=time.monotonic()+5
             while job["state"] not in {"complete","failed","cancelled"} and time.monotonic()<deadline:time.sleep(.01)
@@ -80,7 +82,12 @@ def main():
             assert a['id']!=b['id']
             try:manager.authorize(a,second);raise AssertionError('越权未阻止')
             except app.ApiError as e:assert e.status==403
-            receive(a); assert started.wait(2)
+            middle=len(raw)//2
+            chunk(a,0,raw[:middle]); assert a['received']==middle
+            chunk(a,0,raw[:middle]); assert a['received']==middle
+            try:chunk(a,0,b'x'*middle);raise AssertionError('冲突分块未拒绝')
+            except app.ApiError as error:assert error.status==409
+            chunk(a,middle,raw[middle:]); assert started.wait(2)
             receive(b); assert b['state']=='queued'
             manager.cancel(b); assert b['state']=='cancelled' and not a.get('cancel_requested')
             release.set();wait(a);wait(b);assert a['state']=='complete',a

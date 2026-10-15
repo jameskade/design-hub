@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_VERSION = json.loads((ROOT / "sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/manifest.json").read_text(encoding="utf-8"))["version"]
 STATIC_DIR = ROOT / "server" / "static"
 # 只发布安装必需的已知文件；新增插件资源时同步此白名单，禁止打包服务工作目录。
-PLUGIN_DOWNLOAD_FILES = ("Contents/Sketch/manifest.json", "Contents/Sketch/script.js", "Contents/Sketch/snapshot.js", "Contents/Sketch/local-upload.js")
+PLUGIN_DOWNLOAD_FILES = ("Contents/Sketch/manifest.json", "Contents/Sketch/script.js", "Contents/Sketch/snapshot.js")
 DATA_DIR = Path(os.environ.get("DESIGN_HUB_DATA_DIR", ROOT / "data")).resolve()
 DB_PATH = DATA_DIR / "design-hub.sqlite3"
 PROJECT_DATA_DIR = DATA_DIR / "projects"
@@ -871,7 +871,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if session["kind"] == "api_key" and method != "GET":
             raise ApiError(403, "API Key 只允许读取数据")
         if path == "/api/me" and method == "GET":
-            return self._json(200, {"user": user, "auth_kind": session["kind"], "csrf_token": session["csrf_token"], "snapshot_upload_enabled": os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED") == "1", "parallel_upload_enabled": True})
+            return self._json(200, {"user": user, "auth_kind": session["kind"], "csrf_token": session["csrf_token"], "snapshot_upload_enabled": os.environ.get("DESIGN_HUB_SNAPSHOT_ENABLED") == "1", "parallel_upload_enabled": True, "source_upload_protocol": 2, "source_chunk_bytes": 4 * 1024 * 1024, "processing_mode": "server"})
         if path == "/api/logout" and method == "POST":
             with WRITE_LOCK, db_connection() as db:
                 db.execute("DELETE FROM sessions WHERE id = ?", (session["id"],))

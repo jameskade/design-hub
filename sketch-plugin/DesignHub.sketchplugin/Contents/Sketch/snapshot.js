@@ -110,23 +110,45 @@ module.exports = function uploadSnapshot(options, completion) {
     timers.setTimeout(poll, 150);
   }
   let requestIndex = 0;
-  function request(method, path, body, file, callback, allowCancelled = false) {
+  function request(method, path, body, file, callback, allowCancelled = false, extraHeaders = {}, failure = null) {
     const n = ++requestIndex; const output = root + "/response-" + n + ".json";
     // 凭据只写入私有配置文件，不出现在进程参数或日志。
     const quote = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]/g, "");
     const config = root + "/curl-" + n + ".conf";
-    write(config, 'header = "Authorization: Bearer ' + quote(token) + '"\nheader = "Content-Type: ' + (file ? 'application/octet-stream' : 'application/json') + '"\n');
+    const extra = Object.keys(extraHeaders).map((key) => 'header = "' + quote(key) + ': ' + quote(extraHeaders[key]) + '"').join("\n");
+    write(config, 'header = "Authorization: Bearer ' + quote(token) + '"\nheader = "Content-Type: ' + (file ? 'application/octet-stream' : 'application/json') + '"\n' + extra + (extra ? "\n" : ""));
     const args = ["--silent", "--show-error", "--noproxy", "*", "--connect-timeout", "10", "--max-time", file ? "1800" : "30", "--fail-with-body", "--config", config, "--request", method, "--output", output];
     if (file) args.push("--data-binary", "@" + file);
     else if (body !== null) { const payload = root + "/body-" + n + ".json"; write(payload, JSON.stringify(body)); args.push("--data-binary", "@" + payload); }
     args.push(origin + path);
     process("/usr/bin/curl", args, (code) => {
       let result = {}; try { result = json(output); } catch (_) {}
-      if (code !== 0) return finish((result.error || "网络请求失败") + (job ? "\n任务 ID：" + job.id + "，可在服务端任务列表确认状态。" : ""));
+      if (code !== 0) {
+        if (failure) return failure(result);
+        return finish((result.error || "网络请求失败") + (job ? "\n任务 ID：" + job.id + "，可在服务端任务列表确认状态。" : ""));
+      }
       callback(result);
     }, allowCancelled);
   }
   const base = "/api/projects/" + projectId + "/snapshot-jobs";
+  function uploadChunks(file, size, offset = 0, attempt = 0) {
+    if (cancelled) return cancelRemote();
+    if (offset >= size) return pollJob();
+    const length = Math.min(4 * 1024 * 1024, size - offset);
+    const chunk = root + "/upload-chunk.bin";
+    const input = NSFileHandle.fileHandleForReadingAtPath(file);
+    input.seekToFileOffset(offset);
+    const data = input.readDataOfLength(length); input.closeFile();
+    if (Number(data.length()) !== length || !data.writeToFile_atomically(chunk, true)) return finish("无法读取上传分块");
+    progress("后台上传源稿 " + ((offset + length) / size * 100).toFixed(0) + "%\n任务 " + job.id);
+    request("POST", base + "/" + job.id + "/chunk", null, chunk, (result) => {
+      fm.removeItemAtPath_error(chunk, null);
+      uploadChunks(file, size, Number(result.received || offset + length), 0);
+    }, false, {"X-Upload-Offset": String(offset)}, (result) => {
+      if (attempt < 3) return timers.setTimeout(() => uploadChunks(file, size, offset, attempt + 1), 500 * (attempt + 1));
+      finish((result.error || "源稿分块上传失败") + "\n任务 ID：" + job.id + "，可重新上传并由服务端清理未完成任务。");
+    });
+  }
   function cancelRemote() {
     if (creating || saving) return;
     if (!job) return finish("已取消，本次未提交渲染任务");
@@ -167,8 +189,8 @@ module.exports = function uploadSnapshot(options, completion) {
           request("POST", base, {folder_id: folderId, boards, size}, null, (result) => {
             job = result; creating = false;
             if (cancelled) return cancelRemote();
-            progress("后台上传快照 " + (size / 1024 / 1024).toFixed(1) + " MB…");
-            request("POST", base + "/" + job.id + "/file", null, root + "/snapshot.sketch", pollJob);
+            progress("后台上传源稿 " + (size / 1024 / 1024).toFixed(1) + " MB…");
+            uploadChunks(root + "/snapshot.sketch", size, Number(result.received || 0));
           }, true);
         });
       });

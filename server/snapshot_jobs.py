@@ -285,14 +285,7 @@ class SnapshotJobs:
                     out.write(block)
                     remaining -= len(block)
                     self.update(job, received=job["size"] - remaining, phase="上传中")
-            with self.validation:
-                self.check(job)
-                validate_snapshot(work / "input.sketch", job["boards"])
-            with self.lock:
-                if job.get("cancel_requested"):
-                    raise Cancelled()
-                self.update(job, state="queued", phase="排队中")
-                self.pending.put(job["id"])
+            self.queue_uploaded(job, work)
         except Exception as error:
             was_cancelled = isinstance(error, Cancelled) or job.get("cancel_requested")
             self.update(job, state="cancelled" if was_cancelled else "failed", error="上传已取消" if was_cancelled else "快照上传或校验失败")
@@ -302,6 +295,57 @@ class SnapshotJobs:
             job["transferring"] = False
             handler.connection.settimeout(previous_timeout)
         return self.public(job)
+
+    def queue_uploaded(self, job, work):
+        with self.validation:
+            self.check(job)
+            validate_snapshot(work / "input.sketch", job["boards"])
+        with self.lock:
+            if job.get("cancel_requested"):
+                raise Cancelled()
+            self.update(job, state="queued", phase="排队中")
+            self.pending.put(job["id"])
+
+    def receive_chunk(self, handler, job):
+        try:
+            offset = int(handler.headers.get("X-Upload-Offset", "-1"))
+            length = int(handler.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise self.app.ApiError(400, "上传分块参数无效")
+        if offset < 0 or not 1 <= length <= 4 * 1024**2 or offset + length > job["size"]:
+            raise self.app.ApiError(400, "上传分块范围无效")
+        body = handler.rfile.read(length)
+        if len(body) != length:
+            raise self.app.ApiError(400, "上传分块不完整")
+        work = self.root / job["id"] / "work"
+        target = work / "input.sketch"
+        with self.lock:
+            if job["state"] != "receiving" or job.get("transferring"):
+                raise self.app.ApiError(409, "任务不再接收文件")
+            if offset > job["received"]:
+                raise self.app.ApiError(409, f"上传位置不连续，服务端需要从 {job['received']} 继续")
+            job["transferring"] = True
+        try:
+            if offset < job["received"]:
+                with target.open("rb") as source:
+                    source.seek(offset)
+                    if source.read(length) != body:
+                        raise self.app.ApiError(409, "重复上传分块内容冲突")
+                return self.public(job)
+            with target.open("ab") as output:
+                output.write(body)
+            self.update(job, received=offset + length, phase="上传中")
+            if job["received"] == job["size"]:
+                try:
+                    self.queue_uploaded(job, work)
+                except Exception as error:
+                    was_cancelled = isinstance(error, Cancelled) or job.get("cancel_requested")
+                    self.update(job, state="cancelled" if was_cancelled else "failed", error="上传已取消" if was_cancelled else "快照上传或校验失败")
+                    self.cleanup(job)
+                    raise self.app.ApiError(400, job["error"]) from error
+            return self.public(job)
+        finally:
+            job["transferring"] = False
 
     def cancel(self, job):
         with self.lock:
@@ -524,6 +568,8 @@ class SnapshotJobs:
                 return handler._json(200, self.public(job))
         if method == "POST" and action == "file":
             return handler._json(200, self.receive(handler, job))
+        if method == "POST" and action == "chunk":
+            return handler._json(200, self.receive_chunk(handler, job))
         if method == "POST" and action == "cancel":
             return handler._json(200, self.cancel(job))
         raise self.app.ApiError(405, "任务操作不支持")

@@ -194,15 +194,12 @@ function choose(title, items, callback) {
   });
 }
 
-function confirmProcessingMode(artboards, projectName, folderName, origin) {
+function confirmServerUpload(artboards, projectName, folderName, origin) {
   const alert = NSAlert.alloc().init();
   alert.setMessageText(`上传 ${artboards.length} 个画板`);
-  alert.setInformativeText(`${origin}\n${projectName} / ${folderName}\n\n请选择处理方式。服务器处理上传快照；本地处理导出资源后后台并行上传。`);
-  const mode = NSPopUpButton.alloc().initWithFrame_pullsDown(NSMakeRect(0,0,340,30),false);
-  mode.addItemsWithTitles(["服务器处理（推荐）", "本地处理（后台并行上传）"]);
-  alert.setAccessoryView(mode);alert.addButtonWithTitle("开始上传");alert.addButtonWithTitle("取消");
-  if(alert.runModal()!==NSAlertFirstButtonReturn)return null;
-  return Number(mode.indexOfSelectedItem())===0 ? "server" : "local";
+  alert.setInformativeText(`${origin}\n${projectName} / ${folderName}\n\n源稿、解析和资源将由服务器统一处理，本机不会逐图层导出资源。`);
+  alert.addButtonWithTitle("开始上传");alert.addButtonWithTitle("取消");
+  return alert.runModal()===NSAlertFirstButtonReturn;
 }
 
 function number(value) {
@@ -479,16 +476,11 @@ function uploadWithProcessingMode(token, project, folder, artboards) {
   const origin=normalizeServerURL(serverURL());
   const projectId=String(project.id || ""),folderId=String(folder.id || ""),sessionToken=String(token || "");
   if(!/^[0-9a-f-]{36}$/i.test(projectId)||!/^[0-9a-f-]{36}$/i.test(folderId)||!sessionToken){UI.alert("无法上传","项目、目录或登录状态无效");return;}
-  const mode=confirmProcessingMode(artboards,project.name,folder.name,origin);
-  if(!mode)return;
+  if(!confirmServerUpload(artboards,project.name,folder.name,origin))return;
   const capabilities=request("GET","/api/me",null,sessionToken,origin);
   const options={token:sessionToken,origin,projectId,folderId,artboards};
-  if(mode==="local") {
-    if(capabilities.parallel_upload_enabled!==true){UI.alert("服务器需要更新","当前服务不支持并行批次，请先更新服务后再使用本地处理。");return;}
-    require("./local-upload")({...options,buildPayload,collectLayers:collectAssetLayers,exportLayer:(layer,directory)=>exportLayerFiles(layer,directory).concat(exportShadowlessLayerFiles(layer,directory))});
-    return;
-  }
-  if(capabilities.snapshot_upload_enabled!==true){UI.alert("服务器处理未启用","当前服务器未启用快照渲染，请启用后重试，或重新选择本地处理。");return;}
+  if(capabilities.snapshot_upload_enabled!==true){UI.alert("服务器处理未启用","当前服务器未启用源稿解析与渲染，请联系管理员更新配置后重试。");return;}
+  if(capabilities.source_upload_protocol!==2||capabilities.processing_mode!=="server"){UI.alert("服务器需要更新","当前服务器不支持统一源稿处理，请先更新服务后再上传。");return;}
   require("./snapshot")( {...options,
     metadata: layerMetadata,
     resources: (board) => collectAssetLayers(board).map((layer) => ({layer_id: layerIdentifier(layer), name: String(layer.name), width: number(layer.frame.width), height: number(layer.frame.height), has_shadow: enabledShadows(layer).length > 0})),

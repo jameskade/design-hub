@@ -2,9 +2,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/script.js'), 'utf8');
+const snapshotSource = fs.readFileSync(require('node:path').join(__dirname, '../sketch-plugin/DesignHub.sketchplugin/Contents/Sketch/snapshot.js'), 'utf8');
+assert(!source.includes('require("./local-upload")'),'新插件不得再进入本地资源处理');
+assert(snapshotSource.includes('uploadChunks') && snapshotSource.includes('/chunk'),'新插件必须使用分块源稿上传');
 const projectId = '11111111-1111-1111-1111-111111111111';
 const folderId = '22222222-2222-2222-2222-222222222222';
-function run(valid, mode = 'local') {
+function run(valid, confirmed = true) {
   const calls = [], alerts = [], dispatched = [];
   let configuredOrigin = 'http://first-server:8765';
   const context = vm.createContext({console, require(name) {
@@ -16,23 +19,23 @@ function run(valid, mode = 'local') {
   vm.runInContext(source, context);
   Object.assign(context, {project: {id: valid ? projectId : undefined, name: 'project'}, folder: {id:folderId, name:'folder'}, calls, projectId, folderId});
   vm.runInContext(`
-    confirmProcessingMode = () => ${JSON.stringify(mode)};
+    confirmServerUpload = () => ${JSON.stringify(confirmed)};
     request = (method, path, body, token, selectedOrigin) => {
       calls.push({path,body,token,selectedOrigin});
-      return {snapshot_upload_enabled:true,parallel_upload_enabled:true};
+      return {snapshot_upload_enabled:true,parallel_upload_enabled:true,source_upload_protocol:2,processing_mode:'server'};
     };
     uploadWithProcessingMode('test-token',project,folder,[{id:'board',name:'board'}]);
     // 回调退出后即使原对象不再提供 ID，后续任务仍必须使用已选目标。
     delete project.id; delete folder.id;
   `, context);
   configuredOrigin = 'http://another-server:8765';
-  if (valid && mode) {
+  if (valid && confirmed) {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].path, '/api/me');
     assert(calls.every(c => c.token === 'test-token' && !c.path.includes('undefined')));
     assert(calls.every(c => c.selectedOrigin === 'http://first-server:8765'));
     assert.equal(dispatched.length,1);
-    assert.equal(dispatched[0].name,mode==='local'?'./local-upload':'./snapshot');
+    assert.equal(dispatched[0].name,'./snapshot');
     assert.equal(dispatched[0].options.projectId,projectId);
     assert.equal(dispatched[0].options.folderId,folderId);
     assert.equal(dispatched[0].options.origin,'http://first-server:8765');
@@ -44,7 +47,7 @@ function run(valid, mode = 'local') {
     if (!valid) assert.equal(alerts[0][0], '无法上传');
   }
 }
-run(true); run(true,'server'); run(true,null); run(false);
+run(true); run(true,false); run(false);
 for (const mode of ['same','changed','cancel','invalid']) {
   const values = {'designHub.serverURL':'http://first-server:8765','designHub.sessionToken':'existing-token'};
   let input, called=0;
