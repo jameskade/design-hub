@@ -283,6 +283,17 @@ def init_database():
                 details_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS access_summaries (
+                day TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL,
+                access_count INTEGER NOT NULL,
+                first_at TEXT NOT NULL,
+                last_at TEXT NOT NULL,
+                PRIMARY KEY(day,user_id,api_key_id,project_id,channel)
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
             CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, revoked_at);
             CREATE INDEX IF NOT EXISTS idx_members_user ON project_members(user_id);
@@ -574,6 +585,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         self._audit_user = None
         self._audit_status = 500
         self._audit_kind = None
+        self._audit_session_id = None
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
@@ -611,6 +623,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 user, session = self._authenticate()
                 self._audit_user = user["id"]
                 self._audit_kind = session["kind"]
+                self._audit_session_id = session["id"]
                 if method in {"POST", "PATCH", "DELETE"}:
                     self._check_csrf(session)
                 return self._api(method, path, query, user, session)
@@ -629,7 +642,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
 
     def _record_request(self, method):
         path = urlparse(self.path).path.rstrip('/')
-        if not path.startswith('/api/') or path in {'/api/health','/api/integrations','/api/me','/api/audit'}:
+        if method != 'GET' or self._audit_kind != 'api_key' or not 200 <= self._audit_status < 300:
             return
         parts = path.strip('/').split('/')
         # 不记录 body、查询参数、Authorization、Key 原文；未知路径片段不写入日志。
@@ -650,7 +663,15 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                         }[parts[1]]
                         row = db.execute(sql,(identifier,)).fetchone()
                         project_id = row[0] if row else None
-                audit(db,self._audit_user,'request.'+method,'request',safe_path,{'status':self._audit_status,'auth_kind':self._audit_kind,'project_id':project_id})
+                if not project_id:
+                    return
+                now=utc_now(); day=now[:10]
+                db.execute(
+                    """INSERT INTO access_summaries VALUES (?,?,?,?,?,1,?,?)
+                       ON CONFLICT(day,user_id,api_key_id,project_id,channel)
+                       DO UPDATE SET access_count=access_count+1,last_at=excluded.last_at""",
+                    (day,self._audit_user,self._audit_session_id,project_id,'mcp',now,now),
+                )
         except Exception:
             self.log_error('Audit write failed')
 
@@ -1533,7 +1554,9 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (asset_id, version_id, str(asset.get("layer_id") or ""), str(asset.get("name") or "未命名资源")[:160], str(asset.get("kind") or "slice")[:40], safe_format(asset.get("format")), float(asset.get("scale") or 1), str(target), asset.get("width"), asset.get("height"), now),
             )
-        audit(db, user["id"], f"artboard.{status}", "artboard", artboard_id, {"version": version_no, "assets": len(stored_assets)})
+        project_name = db.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()[0]
+        folder_name = db.execute("SELECT name FROM folders WHERE id=?", (folder_id,)).fetchone()[0]
+        audit(db, user["id"], f"artboard.{status}", "artboard", artboard_id, {"version": version_no, "assets": len(stored_assets), "project_name": project_name, "folder_name": folder_name, "design_name": name})
         return {"sketch_id": sketch_id, "name": name, "status": status, "artboard_id": artboard_id, "version": version_no, "source_package_id": board.get("source_package_id")}
 
     def _artboard_detail(self, user, artboard_id):
@@ -1891,7 +1914,14 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 """ + where + " ORDER BY audit_logs.id DESC LIMIT ?",
                 (*values,limit+1),
             ).fetchall()
-        return self._json(200, {"logs": [dict(row) for row in rows[:limit]], "next_cursor":rows[limit-1]['id'] if len(rows)>limit else None})
+        logs=[]
+        for row in rows[:limit]:
+            item=dict(row); details=json.loads(item["details_json"] or "{}")
+            if item["action"] in {"artboard.created","artboard.updated"} and all(details.get(key) for key in ("project_name","folder_name","design_name")):
+                verb="上传了" if item["action"]=="artboard.created" else "更新了"
+                item["message"]=f"{item.get('actor_name') or '未知用户'}{verb}「{details['project_name']}」项目「{details['folder_name']}」目录的「{details['design_name']}」设计稿"
+            logs.append(item)
+        return self._json(200, {"logs": logs, "next_cursor":rows[limit-1]['id'] if len(rows)>limit else None})
 
 
 def main():

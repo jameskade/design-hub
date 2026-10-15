@@ -119,12 +119,17 @@ def main():
             assert not {r['id'] for r in page['logs']} & {r['id'] for r in next_page['logs']}
             editor.call('GET','/api/audit?project_id='+pid,status=403)
             assert viewer.call('GET','/api/audit')['logs']==[]
+            all_logs=owner.call('GET','/api/audit?project_id='+pid+'&limit=100')['logs']
+            assert any('上传了「测试项目」项目「测试目录」目录的「测试画板」设计稿' in row.get('message','') for row in all_logs)
             with app.db_connection() as db:
                 logs=[dict(r) for r in db.execute('SELECT * FROM audit_logs')]
             serialized=json.dumps(logs)
             assert key not in serialized and legacy not in serialized and 'PasswordOnly!' not in serialized
-            assert any(r['action']=='request.POST' and json.loads(r['details_json']).get('status')==401 for r in logs)
+            assert not any(r['action'].startswith('request.') for r in logs)
             assert any(r['action']=='project.delete' and r['project_id']==pid for r in logs)
+            with app.db_connection() as db:
+                summaries=[dict(r) for r in db.execute('SELECT * FROM access_summaries')]
+            assert summaries and all(r['channel']=='mcp' and r['access_count']>=1 for r in summaries)
             print('PASS: Key可回看/用途编辑/本人隔离/密文/旧Key/主密钥丢失/撤销；项目与画板回收直链隔离及恢复；最后Owner；日志分页权限与脱敏')
             if os.environ.get('DESIGN_HUB_TEST_UI') == '1':
                 owner.call('POST','/api/api-keys',{'name':'仅测试用的Key','purpose':'浏览器回归，不用于正式环境'},status=201)
