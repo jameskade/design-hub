@@ -226,6 +226,27 @@ def init_database():
                 deleted_at TEXT,
                 UNIQUE(project_id, sketch_id)
             );
+            CREATE TABLE IF NOT EXISTS source_blobs (
+                sha256 TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                raw_size INTEGER NOT NULL,
+                stored_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_packages (
+                id TEXT PRIMARY KEY,
+                package_hash TEXT NOT NULL UNIQUE,
+                root_layer_id TEXT NOT NULL,
+                sketch_app_version TEXT NOT NULL,
+                created_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_package_entries (
+                package_id TEXT NOT NULL REFERENCES source_packages(id) ON DELETE CASCADE,
+                logical_path TEXT NOT NULL,
+                blob_sha256 TEXT NOT NULL REFERENCES source_blobs(sha256),
+                PRIMARY KEY(package_id, logical_path)
+            );
             CREATE TABLE IF NOT EXISTS artboard_versions (
                 id TEXT PRIMARY KEY,
                 artboard_id TEXT NOT NULL REFERENCES artboards(id) ON DELETE CASCADE,
@@ -233,6 +254,7 @@ def init_database():
                 content_hash TEXT NOT NULL,
                 metadata_path TEXT NOT NULL,
                 preview_path TEXT NOT NULL,
+                source_package_id TEXT REFERENCES source_packages(id),
                 created_by TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 UNIQUE(artboard_id, version_no)
@@ -266,6 +288,7 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_artboards_folder ON artboards(folder_id, deleted_at);
             CREATE INDEX IF NOT EXISTS idx_versions_artboard ON artboard_versions(artboard_id, version_no DESC);
             CREATE INDEX IF NOT EXISTS idx_assets_version ON assets(version_id);
+            CREATE INDEX IF NOT EXISTS idx_source_entries_blob ON source_package_entries(blob_sha256);
             """
         )
         columns = {row[1] for row in db.execute("PRAGMA table_info(artboards)")}
@@ -273,6 +296,9 @@ def init_database():
             db.execute("ALTER TABLE artboards ADD COLUMN canvas_x REAL NOT NULL DEFAULT 0")
         if "canvas_y" not in columns:
             db.execute("ALTER TABLE artboards ADD COLUMN canvas_y REAL NOT NULL DEFAULT 0")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(artboard_versions)")}
+        if "source_package_id" not in columns:
+            db.execute("ALTER TABLE artboard_versions ADD COLUMN source_package_id TEXT")
         columns = {row[1] for row in db.execute("PRAGMA table_info(api_keys)")}
         if "purpose" not in columns:
             db.execute("ALTER TABLE api_keys ADD COLUMN purpose TEXT NOT NULL DEFAULT ''")
@@ -567,7 +593,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             return
         parts = path.strip('/').split('/')
         # 不记录 body、查询参数、Authorization、Key 原文；未知路径片段不写入日志。
-        route_words = {'api','projects','folders','artboards','versions','assets','uploads','upload','chunk','commit','cancel','members','users','api-keys','login','plugin','logout','register','restore','purge','preview','download','export','exports','package','ai-context','recycle'}
+        route_words = {'api','projects','folders','artboards','versions','assets','uploads','upload','chunk','commit','cancel','members','users','api-keys','login','plugin','logout','register','restore','purge','preview','download','export','exports','package','source','ai-context','recycle'}
         safe_path = '/' + '/'.join(p if p in route_words or re.fullmatch(r'[0-9a-f-]{36}',p) else '[invalid]' for p in parts)
         try:
             with WRITE_LOCK, db_connection() as db:
@@ -880,6 +906,8 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 return self._delete_artboard(user, parts[2])
         if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "ai-context" and method == "GET":
             return self._artboard_ai_context(user, parts[2], query)
+        if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "source" and method == "GET":
+            return self._download_artboard_source(user, parts[2])
         if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "restore" and method == "POST":
             return self._restore_artboard(user, parts[2])
         if len(parts) == 4 and parts[:2] == ["api", "artboards"] and parts[3] == "purge" and method == "DELETE":
@@ -1383,14 +1411,16 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             (project_id, sketch_id),
         ).fetchone()
         if existing and existing["current_version_id"]:
-            current = db.execute("SELECT content_hash FROM artboard_versions WHERE id = ?", (existing["current_version_id"],)).fetchone()
+            current = db.execute("SELECT content_hash, source_package_id FROM artboard_versions WHERE id = ?", (existing["current_version_id"],)).fetchone()
             if current and hmac.compare_digest(current["content_hash"], content_hash):
+                if board.get("source_package_id") and not current["source_package_id"]:
+                    db.execute("UPDATE artboard_versions SET source_package_id=? WHERE id=?", (board["source_package_id"], existing["current_version_id"]))
                 db.execute(
                     """UPDATE artboards SET folder_id = ?, name = ?, width = ?, height = ?,
                               canvas_x = ?, canvas_y = ?, deleted_at = NULL, updated_at = ? WHERE id = ?""",
                     (folder_id, name, float(board.get("width") or 0), float(board.get("height") or 0), float(board.get("canvas_x") or 0), float(board.get("canvas_y") or 0), utc_now(), existing["id"]),
                 )
-                return {"sketch_id": sketch_id, "name": name, "status": "unchanged", "artboard_id": existing["id"]}
+                return {"sketch_id": sketch_id, "name": name, "status": "unchanged", "artboard_id": existing["id"], "source_package_id": board.get("source_package_id") or current["source_package_id"]}
 
         artboard_id = existing["id"] if existing else uuid4()
         version_id = uuid4()
@@ -1442,9 +1472,9 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             status = "created"
         db.execute(
             """INSERT INTO artboard_versions
-               (id, artboard_id, version_no, content_hash, metadata_path, preview_path, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (version_id, artboard_id, version_no, content_hash, str(final_dir / "metadata.json"), str(final_dir / "preview.png"), user["id"], now),
+               (id, artboard_id, version_no, content_hash, metadata_path, preview_path, source_package_id, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (version_id, artboard_id, version_no, content_hash, str(final_dir / "metadata.json"), str(final_dir / "preview.png"), board.get("source_package_id"), user["id"], now),
         )
         for asset_id, asset, temporary_target in stored_assets:
             target = final_dir / "assets" / temporary_target.name
@@ -1455,7 +1485,7 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 (asset_id, version_id, str(asset.get("layer_id") or ""), str(asset.get("name") or "未命名资源")[:160], str(asset.get("kind") or "slice")[:40], safe_format(asset.get("format")), float(asset.get("scale") or 1), str(target), asset.get("width"), asset.get("height"), now),
             )
         audit(db, user["id"], f"artboard.{status}", "artboard", artboard_id, {"version": version_no, "assets": len(stored_assets)})
-        return {"sketch_id": sketch_id, "name": name, "status": status, "artboard_id": artboard_id, "version": version_no}
+        return {"sketch_id": sketch_id, "name": name, "status": status, "artboard_id": artboard_id, "version": version_no, "source_package_id": board.get("source_package_id")}
 
     def _artboard_detail(self, user, artboard_id):
         with db_connection() as db:
@@ -1567,6 +1597,27 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         if target.is_dir() and PROJECT_DATA_DIR in target.parents:
             shutil.rmtree(target)
         return self._json(200, {"status": "purged"})
+
+    def _download_artboard_source(self, user, artboard_id):
+        with db_connection() as db:
+            row = db.execute(
+                """SELECT artboards.project_id, artboards.name, artboard_versions.source_package_id
+                   FROM artboards JOIN artboard_versions ON artboard_versions.id=artboards.current_version_id
+                   WHERE artboards.id=? AND artboards.deleted_at IS NULL""",
+                (artboard_id,),
+            ).fetchone()
+            if not row:
+                raise ApiError(404, "设计稿不存在")
+            require_project_role(db, user, row["project_id"], {"viewer", "editor", "owner", "admin"})
+            if not row["source_package_id"]:
+                raise ApiError(409, "该设计稿由旧版插件上传，重新上传后才能下载源稿")
+            try:
+                from .source_packages import SourcePackages
+            except ImportError:
+                from source_packages import SourcePackages
+            body = SourcePackages(DATA_DIR / "source-blobs").bytes(db, row["source_package_id"])
+        safe_name = "".join(character if character not in '\\/:*?\"<>|' else "-" for character in row["name"]) or "design"
+        return self._download_bytes(body, safe_name + ".sketch")
 
     def _download_preview(self, user, version_id):
         with db_connection() as db:

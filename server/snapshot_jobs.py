@@ -14,6 +14,11 @@ import time
 import uuid
 import zipfile
 
+try:
+    from .source_packages import SourcePackages, split_design
+except ImportError:
+    from source_packages import SourcePackages, split_design
+
 TERMINAL = {"complete", "failed", "cancelled"}
 MAX_INPUT = 100 * 1024**2
 MAX_EXPANDED = 512 * 1024**2
@@ -105,6 +110,7 @@ class SnapshotJobs:
         self.stopping = threading.Event()
         self.validation = threading.Semaphore(1)
         self.tool = os.environ.get("DESIGN_HUB_SKETCHTOOL", "/Applications/Sketch.app/Contents/MacOS/sketchtool")
+        self.sources = SourcePackages(app.DATA_DIR / "source-blobs")
         with app.db_connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS snapshot_commits (id TEXT PRIMARY KEY, results TEXT NOT NULL, created REAL NOT NULL)")
         for path in self.root.glob("*/state.json"):
@@ -326,6 +332,8 @@ class SnapshotJobs:
         work = self.root / job["id"] / "work"
         source = work / "input.sketch"
         files = validate_snapshot(source, job["boards"])
+        source_packages = {board["sketch_id"]: split_design(files, board["sketch_id"]) for board in job["boards"]}
+        sketch_version = str(json.loads(files["meta.json"]).get("appVersion") or "")
         # 只改隔离副本，用同一原生渲染器生成无阴影资源，不修改原设计稿。
         def disable(value):
             if isinstance(value, dict):
@@ -398,7 +406,7 @@ class SnapshotJobs:
                         raise ValueError("资源倍率不匹配")
                 done += 1
             self.update(job, done=done)
-            rendered.append((payload, assets))
+            rendered.append((payload, assets, source_packages[board["sketch_id"]], sketch_version))
         return rendered
 
     def publish(self, job, rendered):
@@ -421,7 +429,9 @@ class SnapshotJobs:
             def track(path):
                 job.setdefault("publish_paths", []).append(str(path))
                 self.save(job)
-            for board, assets in rendered:
+            for board, assets, package, sketch_version in rendered:
+                package_id, package_hash = self.sources.store(db, package, board["sketch_id"], sketch_version, user["id"], app.utc_now())
+                board = {**board, "source_package_id": package_id, "source_package_hash": package_hash}
                 def source():
                     for asset, path in assets:
                         yield asset, path.read_bytes()

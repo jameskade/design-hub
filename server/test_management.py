@@ -82,6 +82,13 @@ def main():
             bid=owner.call('POST',base+'/artboards/upload',{'folder_id':folder,'artboards':[board]})['results'][0]['artboard_id']
             vid=owner.call('GET','/api/artboards/'+bid)['artboard']['current_version_id']
             aid=owner.call('GET','/api/versions/'+vid)['assets'][0]['id']
+            owner.call('GET','/api/artboards/'+bid+'/source',status=409)
+            from source_packages import SourcePackages
+            package={'document.json':b'{}','meta.json':b'{}','user.json':b'{}','pages/test.json':b'{}'}
+            with app.db_connection() as db:
+                source_id,_=SourcePackages(app.DATA_DIR/'source-blobs').store(db,package,'test','2025.3.4',owner_id,app.utc_now())
+                db.execute('UPDATE artboard_versions SET source_package_id=? WHERE id=?',(source_id,vid))
+            assert owner.call('GET','/api/artboards/'+bid+'/source').startswith(b'PK')
             download=owner.call('POST','/api/exports/package',{'artboard_id':bid,'name':'test.zip','files':[{'name':'test.png','data_base64':png}]},status=201)['download_url']
             assert owner.call('GET',download).startswith(b'PK')
             editor.call('GET',download,status=403)

@@ -43,6 +43,10 @@ def main():
                 if extra:z.writestr(*extra)
             return out.getvalue()
         raw=archive()
+        with zipfile.ZipFile(io.BytesIO(raw)) as package_archive:
+            package_files={item.filename:package_archive.read(item) for item in package_archive.infolist()}
+        from source_packages import split_design
+        source_package=split_design(package_files,"board")
         def create(user=first):
             with patch("snapshot_jobs.subprocess.run",return_value=SimpleNamespace(returncode=0,stdout="2025.3.4")):
                 result=manager.create(user,project,dict(folder_id=folder,boards=[board],size=len(raw)))
@@ -60,7 +64,7 @@ def main():
             assert job["state"] in {"complete","failed","cancelled"},job
             assert not (manager.root/job['id']/'work').exists(),job
         def rendered(job):
-            return [({**board,"preview_base64":base64.b64encode(PNG).decode()},[])]
+            return [({**board,"preview_base64":base64.b64encode(PNG).decode()},[],source_package,"2025.3.4")]
         try:
             # 同时提交的不同设计师任务拥有独立所有权、输入和取消状态。
             started=threading.Event(); release=threading.Event()
@@ -82,7 +86,7 @@ def main():
             # 修改预览使 c 产生新版本而非 unchanged。
             def changed(job):
                 payload={**board,'name':'新版本','metadata':{'artboard':{'id':'board','name':'changed'}},'preview_base64':base64.b64encode(PNG).decode()}
-                return [(payload,[])]
+                return [(payload,[],source_package,"2025.3.4")]
             def changed_held(job):started.set();release.wait(5);return changed(job)
             # c 已进入 held；改输入 metadata 在它发布前使其结果变化。
             original_rendered=rendered
