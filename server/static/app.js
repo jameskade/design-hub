@@ -288,7 +288,7 @@ async function loadVersion(versionId) {
     const preview = $("#artboard-preview"); preview.src = image.src; preview.alt = `${artboard.name}，版本 ${version.version.version_no}`;
     const width = Number(artboard.width) || image.naturalWidth; const height = Number(artboard.height) || image.naturalHeight;
     preview.style.width = `${width}px`; preview.style.height = `${height}px`; $("#canvas-stage").style.width = `${width}px`; $("#canvas-stage").style.height = `${height}px`; renderLayerOverlay(width, height); fitViewer();
-    $("#canvas-stage").classList.remove("is-loading"); $("#canvas-stage").inert = false; $("#copy-screen-prompt").disabled = false; $("#viewer-empty").textContent = "点击图层查看标注 · 空格拖动 · 按 0 适应窗口";
+    $("#canvas-stage").classList.remove("is-loading"); $("#canvas-stage").inert = false; $("#copy-screen-prompt").disabled = false; $("#viewer-empty").textContent = "点击选子层 · Option/Alt + 点击选父层 · 空格拖动 · 0 适应窗口";
   } catch (error) { if (epoch !== state.versionEpoch) return; $("#viewer-empty").innerHTML = '<span>设计稿加载失败</span><button class="secondary" id="retry-version">重试</button>'; $("#retry-version").onclick = () => run(() => loadVersion(versionId)); throw error; }
   finally { done(); }
 }
@@ -327,6 +327,13 @@ function layerAtPoint(items, x, y, selected = null) {
   }
   return hit;
 }
+function selectionTarget(hit, current, parentRequested = false) {
+  if (!hit || !parentRequested) return hit;
+  // 只沿命中层的真实祖先移动，不按尺寸、文字或视觉邻近猜测组合关系。
+  const chain = [hit, ...layerAncestors(hit).reverse()];
+  const index = Math.max(0, chain.findIndex(item => item.key === current?.key));
+  return chain[Math.min(index + 1, chain.length - 1)];
+}
 function renderLayerOverlay(width, height) {
   const overlay = $("#layer-overlay"); overlay.innerHTML = ""; overlay.style.width = `${width}px`; overlay.style.height = `${height}px`; clearMeasurements();
   const items = flattenLayers(layerChildren(metadataRoot())); state.layerRects = new Map(items.map((item) => [item.key, item]));
@@ -334,7 +341,7 @@ function renderLayerOverlay(width, height) {
   items.filter(isSelectableLayer).slice(0, 350).forEach((item) => {
     const key = item.key; const button = document.createElement("button"); button.className = "layer-hotspot"; button.dataset.layerKey = key;
     button.style.cssText = `left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;z-index:${2 + item.depth}`; button.title = item.layer.name || "图层"; button.setAttribute("aria-label", `查看 ${item.layer.name || "图层"} 的标注`);
-    button.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); selectLayer(key); } });
+    button.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); const target = selectionTarget(item, state.selectedLayer, event.altKey); selectLayer(target.key, event.altKey, false); } });
     overlay.append(button);
   });
   const point = (event) => { const rect = overlay.getBoundingClientRect(); return { x: (event.clientX - rect.left) / state.zoom, y: (event.clientY - rect.top) / state.zoom }; };
@@ -349,11 +356,11 @@ function renderLayerOverlay(width, height) {
   overlay.onclick = (event) => {
     if (state.spacePressed) return;
     const { x, y } = point(event); const hit = layerAtPoint(items, x, y);
-    if (hit) return selectLayer(hit.key);
+    if (hit) { const target = selectionTarget(hit, state.selectedLayer, event.altKey); return selectLayer(target.key, event.altKey, false); }
     closeInspector();
   };
 }
-function selectLayer(key, explicit = false) {
+function selectLayer(key, explicit = false, focusInspector = explicit) {
   const item = state.layerRects.get(key);
   if (!canSelectLayer(item) || (!explicit && !isSelectableLayer(item))) return;
   clearMeasurements(); state.selectedLayer = item; state.exportScopeKey = null; state.exportIncludeShadows = true;
@@ -364,7 +371,7 @@ function selectLayer(key, explicit = false) {
   outline.style.cssText = `left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px`;
   $("#layer-overlay").append(outline);
   renderProperties(item); $("#viewer-view").classList.remove("inspector-closed"); $(".inspector-panel").inert = false;
-  if (explicit) {
+  if (focusInspector) {
     const heading = $("#layer-hierarchy-title") || $(".export-section h3");
     heading?.setAttribute("tabindex", "-1"); heading?.focus();
   }

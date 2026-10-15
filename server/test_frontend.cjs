@@ -67,6 +67,30 @@ for (const name of ["layerId", "layerChildren", "hasVisibleText", "isAtomicLayer
 }
 const evaluate = (expression) => vm.runInContext(expression, context);
 {
+  vm.runInContext(declaration('layerAncestors'), context);
+  vm.runInContext(declaration('selectionTarget'), context);
+  const outer={key:'outer',layer:{type:'Group'},width:100,height:100};
+  const group={key:'bell-group',parentKey:'outer',layer:{type:'Group'},width:33,height:34};
+  const text={key:'badge',parentKey:'bell-group',layer:{type:'Text'},width:10,height:10};
+  const unrelated={key:'other',layer:{type:'Shape'},width:10,height:10};
+  context.state.layerRects=new Map([outer,group,text,unrelated].map(item=>[item.key,item]));
+  Object.assign(context,{parentHit:text,parentCurrent:null});
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,false).key'),'badge','普通点击仍选角标文字');
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,true).key'),'bell-group','首次Alt点击直接选择父编组');
+  context.parentCurrent=group;
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,true).key'),'outer','同一位置重复Alt逐级向上');
+  context.parentCurrent=outer;
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,true).key'),'outer','到顶不跳到无关图层');
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,false).key'),'badge','普通点击可重新选回子层');
+  context.parentCurrent=unrelated;
+  assert.equal(evaluate('selectionTarget(parentHit,parentCurrent,true).key'),'bell-group','切换命中位置不沿旧选区找父层');
+  group.hidden=true;
+  assert.equal(evaluate('selectionTarget(parentHit,null,true).key'),'outer','祖先过滤不可绕过隐藏限制');
+  assert.equal(evaluate('selectionTarget(null,parentCurrent,true)'),null,'空白不推断组合');
+  context.parentHit=unrelated;
+  assert.equal(evaluate('selectionTarget(parentHit,null,true).key'),'other','无父层不拼接邻居');
+}
+{
   const parent = {key:'button',layer:{name:'按钮<分组>',type:'Group'},width:44,height:44,x:0,y:0};
   const child = {key:'plus',parentKey:'button',layer:{name:'加号',type:'Shape'},width:20,height:20,x:12,y:12};
   const ui = {classList:{remove(){},toggle(){}},append(){},focus(){},remove(){},setAttribute(){}};
