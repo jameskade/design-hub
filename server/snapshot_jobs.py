@@ -33,6 +33,16 @@ class Cancelled(Exception):
     pass
 
 
+def svg_resource_ids(resources, context_layers):
+    result = []
+    for resource in resources:
+        layer = context_layers.get(resource["layer_id"], {})
+        explicit = any(str(item.get("fileFormat", "")).lower() == "svg" for item in layer.get("export_formats", []))
+        if explicit or layer.get("type") in {"shape", "shapePath"}:
+            result.append(resource["layer_id"])
+    return result
+
+
 def read_archive(path):
     # 不 extractall：拒绝目录穿越、链接、重复条目和解压炸弹。
     with zipfile.ZipFile(path) as archive:
@@ -370,17 +380,20 @@ class SnapshotJobs:
             payload["parser_version"] = PARSER_VERSION
             payload["preview_base64"] = base64.b64encode(preview[0].read_bytes()).decode()
             assets = []
+            context_layers = {layer["id"]: layer for layer in payload["design_context"]["layers"]}
             done += 1
             # 小批量复用一次快照解析；仍使用 --serial，避免渲染并发耗尽内存。
             for offset in range(0, len(board["resources"]), 24):
                 batch = board["resources"][offset:offset + 24]
                 keys = ",".join(r["layer_id"] for r in batch)
                 self.update(job, phase=f"画板 {index + 1}/{len(job['boards'])} · 资源 {offset + 1}–{offset + len(batch)}")
-                for fmt, scales in [("png", "1,2,3"), ("svg", "1")]:
-                    self.command(job, ["export", "layers", str(source), "--items=" + keys, "--output=" + str(directory / "slice"), "--formats=" + fmt, "--scales=" + scales, "--use-id-for-name", "--serial"])
+                self.command(job, ["export", "layers", str(source), "--items=" + keys, "--output=" + str(directory / "slice"), "--formats=png", "--scales=3", "--use-id-for-name", "--serial"])
+                svg_keys = svg_resource_ids(batch, context_layers)
+                if svg_keys:
+                    self.command(job, ["export", "layers", str(source), "--items=" + ",".join(svg_keys), "--output=" + str(directory / "slice"), "--formats=svg", "--scales=1", "--use-id-for-name", "--serial"])
                 shadow_keys = ",".join(r["layer_id"] for r in batch if r.get("has_shadow"))
                 if shadow_keys:
-                    self.command(job, ["export", "layers", str(shadowless), "--items=" + shadow_keys, "--output=" + str(directory / "slice-no-shadow"), "--formats=png", "--scales=1,2,3", "--use-id-for-name", "--serial"])
+                    self.command(job, ["export", "layers", str(shadowless), "--items=" + shadow_keys, "--output=" + str(directory / "slice-no-shadow"), "--formats=png", "--scales=3", "--use-id-for-name", "--serial"])
                 self.update(job, done=done + offset + len(batch))
             for resource in board["resources"]:
                 key = resource["layer_id"]
@@ -388,8 +401,8 @@ class SnapshotJobs:
                     target = directory / kind
                     paths = sorted(p for p in target.glob(key + "*") if p.stem == key or re.fullmatch(re.escape(key) + r"@[123]x", p.stem))
                     pngs = [p for p in paths if p.suffix == ".png"]
-                    if len(pngs) != 3:
-                        raise ValueError("资源倍率不完整")
+                    if len(pngs) != 1:
+                        raise ValueError("资源 3x 母版不完整")
                     scales = set()
                     for p in paths:
                         if p.suffix not in {".png", ".svg"}:
@@ -406,7 +419,7 @@ class SnapshotJobs:
                         else:
                             width, height = resource.get("width"), resource.get("height")
                         assets.append((dict(layer_id=key, name=resource.get("name", key), kind=kind, format=p.suffix[1:], scale=scale, width=width, height=height), p))
-                    if scales != {1, 2, 3}:
+                    if scales != {3}:
                         raise ValueError("资源倍率不匹配")
                 done += 1
             self.update(job, done=done)

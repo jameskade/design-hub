@@ -78,7 +78,7 @@ def main():
             (app.DATA_DIR/'saved-key').rename(cipher)
             assert next(k for k in owner.call('GET','/api/api-keys')['api_keys'] if k['id']==kid)['token']==key
             png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
-            board={'sketch_id':'test','name':'测试画板','width':1,'height':1,'metadata':{},'preview_base64':png,'assets':[{'name':'a','layer_id':'a','format':'png','data_base64':png}]}
+            board={'sketch_id':'test','name':'测试画板','width':1,'height':1,'metadata':{},'preview_base64':png,'assets':[{'name':'a','layer_id':'a','format':'png','scale':3,'width':3,'height':3,'data_base64':png}]}
             bid=owner.call('POST',base+'/artboards/upload',{'folder_id':folder,'artboards':[board]})['results'][0]['artboard_id']
             vid=owner.call('GET','/api/artboards/'+bid)['artboard']['current_version_id']
             aid=owner.call('GET','/api/versions/'+vid)['assets'][0]['id']
@@ -89,6 +89,8 @@ def main():
                 source_id,_=SourcePackages(app.DATA_DIR/'source-blobs').store(db,package,'test','2025.3.4',owner_id,app.utc_now())
                 db.execute('UPDATE artboard_versions SET source_package_id=? WHERE id=?',(source_id,vid))
             assert owner.call('GET','/api/artboards/'+bid+'/source').startswith(b'PK')
+            derived=owner.call('GET','/api/versions/'+vid+'/export?layer_id=a&name=a&format=png&platform=ios&scales=1,2')
+            assert derived.startswith(b'PK')
             download=owner.call('POST','/api/exports/package',{'artboard_id':bid,'name':'test.zip','files':[{'name':'test.png','data_base64':png}]},status=201)['download_url']
             assert owner.call('GET',download).startswith(b'PK')
             editor.call('GET',download,status=403)

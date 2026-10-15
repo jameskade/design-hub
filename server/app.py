@@ -1730,6 +1730,11 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         for scale in scales:
             source_format = "png" if file_format == "jpg" else file_format
             source = next((asset for asset in assets if asset["format"] == source_format and float(asset["scale"]) == scale), None)
+            derived = False
+            if not source and source_format == "png":
+                candidates = [asset for asset in assets if asset["format"] == "png" and float(asset["scale"]) > scale]
+                source = max(candidates, key=lambda asset: float(asset["scale"]), default=None)
+                derived = source is not None
             if not source:
                 raise ApiError(404, f"{file_format.upper()} {scale}x 尚未上传，请从 Sketch 重新同步")
             source_path = Path(source["file_path"])
@@ -1742,12 +1747,18 @@ class DesignHubHandler(BaseHTTPRequestHandler):
                 filename = f"{scale}.0x-{safe_name}.{suffix}"
             else:
                 filename = f"{safe_name}{'' if scale == 1 else f'@{scale}x'}.{suffix}"
-            if file_format == "jpg":
+            if file_format == "jpg" or derived:
                 with tempfile.TemporaryDirectory(prefix="design-hub-export-") as directory:
                     target = Path(directory) / filename
-                    result = subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", str(source_path), "--out", str(target)], capture_output=True)
+                    command = ["/usr/bin/sips"]
+                    if derived:
+                        source_scale = float(source["scale"])
+                        command += ["-z", str(max(1, round(float(source["height"] or 0) * scale / source_scale))), str(max(1, round(float(source["width"] or 0) * scale / source_scale)))]
+                    if file_format == "jpg":
+                        command += ["-s", "format", "jpeg"]
+                    result = subprocess.run([*command, str(source_path), "--out", str(target)], capture_output=True)
                     if result.returncode or not target.is_file():
-                        raise ApiError(500, "JPG 转换失败")
+                        raise ApiError(500, "切图倍率或格式转换失败")
                     body = target.read_bytes()
             else:
                 body = source_path.read_bytes()

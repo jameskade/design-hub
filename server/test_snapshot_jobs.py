@@ -18,7 +18,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix="design-hub-snapshot-regression-") as temporary:
         os.environ["DESIGN_HUB_DATA_DIR"] = temporary
         import app
-        from snapshot_jobs import SnapshotJobs, validate_snapshot
+        from snapshot_jobs import SnapshotJobs, svg_resource_ids, validate_snapshot
+        resources=[{'layer_id':key} for key in ['shape','path','image','group','explicit']]
+        layers={'shape':{'type':'shape'},'path':{'type':'shapePath'},'image':{'type':'image'},'group':{'type':'group'},'explicit':{'type':'group','export_formats':[{'fileFormat':'svg'}]}}
+        assert svg_resource_ids(resources,layers)==['shape','path','explicit']
         app.init_database()
         first = dict(id=app.uuid4(), role="designer")
         second = dict(id=app.uuid4(), role="designer")
