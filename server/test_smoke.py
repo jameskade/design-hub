@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 import base64
+import importlib.util
 import json
+import os
+from pathlib import Path
 import sys
+import tempfile
+import threading
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError
-from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 
-BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8765"
 PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 
 class Client:
-    def __init__(self):
-        self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    def __init__(self, origin):
+        self.origin = origin
+        self.opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
         self.csrf = ""
 
     def request(self, method, path, body=None, expected=200, token=None):
@@ -26,7 +31,7 @@ class Client:
             headers["Authorization"] = f"Bearer {token}"
         elif method != "GET" and self.csrf:
             headers["X-CSRF-Token"] = self.csrf
-        request = Request(BASE_URL + path, data=data, headers=headers, method=method)
+        request = Request(self.origin + path, data=data, headers=headers, method=method)
         try:
             response = self.opener.open(request)
             status = response.status
@@ -44,12 +49,12 @@ class Client:
         return payload
 
 
-def main():
-    admin = Client()
+def run(origin, admin_password):
+    admin = Client(origin)
     assert admin.request("GET", "/api/health")["status"] == "ok"
-    admin.login("admin", "CodexAcceptance!2026")
+    admin.login("admin", admin_password)
 
-    anonymous = Client()
+    anonymous = Client(origin)
     for username, display_name in (("designer", "设计同学"), ("developer", "开发同学"), ("pending", "待审核用户")):
         anonymous.request("POST", "/api/register", {
             "username": username,
@@ -62,11 +67,11 @@ def main():
     admin.request("PATCH", f"/api/users/{user_ids['designer']}", {"role": "designer"})
     admin.request("PATCH", f"/api/users/{user_ids['developer']}", {"role": "developer"})
 
-    pending = Client()
+    pending = Client(origin)
     pending.login("pending", "Acceptance!2026")
     pending.request("GET", "/api/projects", expected=403)
 
-    designer = Client()
+    designer = Client(origin)
     designer.login("designer", "Acceptance!2026")
     created = designer.request("POST", "/api/projects", {"name": "验收项目", "description": "smoke"}, expected=201)
     project_id = created["id"]
@@ -77,7 +82,7 @@ def main():
     designer.request("POST", f"/api/projects/{project_id}/members", {"user_id": user_ids["developer"], "role": "editor"}, expected=400)
     designer.request("POST", f"/api/projects/{project_id}/members", {"user_id": user_ids["developer"], "role": "viewer"})
 
-    plugin = Client().login("designer", "Acceptance!2026", plugin=True)
+    plugin = Client(origin).login("designer", "Acceptance!2026", plugin=True)
     token = plugin["token"]
     upload = {
         "folder_id": folder_id,
@@ -93,16 +98,16 @@ def main():
             "assets": [{"layer_id": "ICON-1", "name": "icon_login", "kind": "slice", "format": "png", "scale": 2, "width": 48, "height": 48, "data_base64": PNG_1X1}],
         }],
     }
-    result = Client().request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
+    result = Client(origin).request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
     assert result["status"] == "created"
     artboard_id = result["artboard_id"]
-    unchanged = Client().request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
+    unchanged = Client(origin).request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
     assert unchanged["status"] == "unchanged"
     upload["artboards"][0]["metadata"]["artboard"]["layers"][0]["text"]["content"] = "欢迎登录"
-    updated = Client().request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
+    updated = Client(origin).request("POST", f"/api/projects/{project_id}/artboards/upload", upload, token=token)["results"][0]
     assert updated["status"] == "updated" and updated["version"] == 2
 
-    developer = Client()
+    developer = Client(origin)
     developer.login("developer", "Acceptance!2026")
     assert any(project["id"] == project_id for project in developer.request("GET", "/api/projects")["projects"])
     developer.request("POST", "/api/projects", {"name": "不允许"}, expected=403)
@@ -120,6 +125,35 @@ def main():
     designer.request("POST", f"/api/artboards/{artboard_id}/restore")
     assert admin.request("GET", "/api/audit")["logs"]
     print("PASS: auth, RBAC, project membership, versioning, assets, recycle, audit")
+
+
+def main():
+    if len(sys.argv) > 1:
+        run(sys.argv[1].rstrip("/"), os.environ.get("DESIGN_HUB_SMOKE_ADMIN_PASSWORD", "CodexAcceptance!2026"))
+        return
+    with tempfile.TemporaryDirectory(prefix="design-hub-smoke-") as directory:
+        os.environ["DESIGN_HUB_DATA_DIR"] = directory
+        os.environ["DESIGN_HUB_ADMIN_USERNAME"] = "admin"
+        os.environ["DESIGN_HUB_ADMIN_PASSWORD"] = "TestAdminOnly!2026"
+        spec = importlib.util.spec_from_file_location("smoke_app", Path(__file__).with_name("app.py"))
+        app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(app)
+        app.init_database()
+        app.ensure_initial_admin()
+
+        class Handler(app.DesignHubHandler):
+            def log_message(self, *args):
+                pass
+
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            run(f"http://127.0.0.1:{server.server_port}", "TestAdminOnly!2026")
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
 
 
 if __name__ == "__main__":
