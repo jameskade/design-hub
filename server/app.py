@@ -255,6 +255,8 @@ def init_database():
                 metadata_path TEXT NOT NULL,
                 preview_path TEXT NOT NULL,
                 source_package_id TEXT REFERENCES source_packages(id),
+                parser_version INTEGER,
+                design_context_path TEXT,
                 created_by TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 UNIQUE(artboard_id, version_no)
@@ -299,6 +301,10 @@ def init_database():
         columns = {row[1] for row in db.execute("PRAGMA table_info(artboard_versions)")}
         if "source_package_id" not in columns:
             db.execute("ALTER TABLE artboard_versions ADD COLUMN source_package_id TEXT")
+        if "parser_version" not in columns:
+            db.execute("ALTER TABLE artboard_versions ADD COLUMN parser_version INTEGER")
+        if "design_context_path" not in columns:
+            db.execute("ALTER TABLE artboard_versions ADD COLUMN design_context_path TEXT")
         columns = {row[1] for row in db.execute("PRAGMA table_info(api_keys)")}
         if "purpose" not in columns:
             db.execute("ALTER TABLE api_keys ADD COLUMN purpose TEXT NOT NULL DEFAULT ''")
@@ -1411,10 +1417,16 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             (project_id, sketch_id),
         ).fetchone()
         if existing and existing["current_version_id"]:
-            current = db.execute("SELECT content_hash, source_package_id FROM artboard_versions WHERE id = ?", (existing["current_version_id"],)).fetchone()
+            current = db.execute("SELECT content_hash, source_package_id, metadata_path, design_context_path FROM artboard_versions WHERE id = ?", (existing["current_version_id"],)).fetchone()
             if current and hmac.compare_digest(current["content_hash"], content_hash):
                 if board.get("source_package_id") and not current["source_package_id"]:
                     db.execute("UPDATE artboard_versions SET source_package_id=? WHERE id=?", (board["source_package_id"], existing["current_version_id"]))
+                if board.get("design_context") and not current["design_context_path"]:
+                    context_path = Path(current["metadata_path"]).parent / "design-context.json"
+                    temporary_context = context_path.with_suffix(".tmp")
+                    temporary_context.write_text(canonical_json(board["design_context"]), encoding="utf-8")
+                    os.replace(temporary_context, context_path)
+                    db.execute("UPDATE artboard_versions SET parser_version=?, design_context_path=? WHERE id=?", (board.get("parser_version"), str(context_path), existing["current_version_id"]))
                 db.execute(
                     """UPDATE artboards SET folder_id = ?, name = ?, width = ?, height = ?,
                               canvas_x = ?, canvas_y = ?, deleted_at = NULL, updated_at = ? WHERE id = ?""",
@@ -1435,10 +1447,13 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         try:
             metadata_path = temp_dir / "metadata.json"
             preview_path = temp_dir / "preview.png"
+            context_path = temp_dir / "design-context.json"
             assets_dir = temp_dir / "assets"
             assets_dir.mkdir()
             metadata_path.write_text(canonical_json(metadata), encoding="utf-8")
             preview_path.write_bytes(preview)
+            if board.get("design_context"):
+                context_path.write_text(canonical_json(board["design_context"]), encoding="utf-8")
             stored_assets = []
             for index, (asset, raw) in enumerate(asset_source() if asset_source else asset_payloads):
                 asset_id = uuid4()
@@ -1472,9 +1487,9 @@ class DesignHubHandler(BaseHTTPRequestHandler):
             status = "created"
         db.execute(
             """INSERT INTO artboard_versions
-               (id, artboard_id, version_no, content_hash, metadata_path, preview_path, source_package_id, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (version_id, artboard_id, version_no, content_hash, str(final_dir / "metadata.json"), str(final_dir / "preview.png"), board.get("source_package_id"), user["id"], now),
+               (id, artboard_id, version_no, content_hash, metadata_path, preview_path, source_package_id, parser_version, design_context_path, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (version_id, artboard_id, version_no, content_hash, str(final_dir / "metadata.json"), str(final_dir / "preview.png"), board.get("source_package_id"), board.get("parser_version"), str(final_dir / "design-context.json") if board.get("design_context") else None, user["id"], now),
         )
         for asset_id, asset, temporary_target in stored_assets:
             target = final_dir / "assets" / temporary_target.name
@@ -1562,7 +1577,10 @@ class DesignHubHandler(BaseHTTPRequestHandler):
         payload.pop("metadata_path", None)
         payload.pop("preview_path", None)
         payload["preview_url"] = f"/api/versions/{version_id}/preview"
-        return self._json(200, {"version": payload, "metadata": metadata, "assets": [{**dict(row), "download_url": f"/api/assets/{row['id']}/download"} for row in assets]})
+        design_context = None
+        if version["design_context_path"] and Path(version["design_context_path"]).is_file():
+            design_context = json.loads(Path(version["design_context_path"]).read_text(encoding="utf-8"))
+        return self._json(200, {"version": payload, "metadata": metadata, "design_context": design_context, "assets": [{**dict(row), "download_url": f"/api/assets/{row['id']}/download"} for row in assets]})
 
     def _delete_artboard(self, user, artboard_id):
         with WRITE_LOCK, db_connection() as db:

@@ -23,6 +23,7 @@ def main():
         app.init_database()
         app.ensure_initial_admin()
         from source_packages import SourcePackages, split_design
+        from sketch_parser import parse_design
 
         document = {
             "pages": [{"_ref": "pages/main"}, {"_ref": "pages/symbols"}],
@@ -44,6 +45,10 @@ def main():
         }
         packages = SourcePackages(Path(directory) / "source-blobs")
         first, second = split_design(files, "BOARD-A"), split_design(files, "BOARD-B")
+        context = parse_design(first, "BOARD-A")
+        assert context["root_layer_id"] == "BOARD-A"
+        assert [layer["id"] for layer in context["layers"]] == ["BOARD-A", "BOARD-A-I"]
+        assert context["layers"][1]["parent_id"] == "BOARD-A"
         with app.db_connection() as db:
             user_id = db.execute("SELECT id FROM users WHERE username_norm='admin'").fetchone()[0]
             first_id, first_hash = packages.store(db, first, "BOARD-A", "2025.3.4", user_id, app.utc_now())
@@ -65,7 +70,7 @@ def main():
             assert len(rebuilt_document["pages"]) == 2
             assert [layer["do_objectID"] for layer in page["layers"]] == ["BOARD-A"]
             assert archive.read("images/shared.png") == b"shared-image-bytes"
-        print("PASS: 一稿一源、传递依赖、共享 Blob 去重、标准 Sketch 重建")
+        print("PASS: 一稿一源、传递依赖、共享 Blob 去重、标准 Sketch 重建、版本化图层解析")
 
 
 if __name__ == "__main__":

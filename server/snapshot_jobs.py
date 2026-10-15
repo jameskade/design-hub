@@ -16,8 +16,10 @@ import zipfile
 
 try:
     from .source_packages import SourcePackages, split_design
+    from .sketch_parser import PARSER_VERSION, parse_design
 except ImportError:
     from source_packages import SourcePackages, split_design
+    from sketch_parser import PARSER_VERSION, parse_design
 
 TERMINAL = {"complete", "failed", "cancelled"}
 MAX_INPUT = 100 * 1024**2
@@ -364,6 +366,8 @@ class SnapshotJobs:
             if len(preview) != 1:
                 raise ValueError("画板预览缺失")
             payload = {k: board[k] for k in ("sketch_id", "name", "width", "height", "metadata", "canvas_x", "canvas_y") if k in board}
+            payload["design_context"] = parse_design(source_packages[board["sketch_id"]], board["sketch_id"])
+            payload["parser_version"] = PARSER_VERSION
             payload["preview_base64"] = base64.b64encode(preview[0].read_bytes()).decode()
             assets = []
             done += 1
